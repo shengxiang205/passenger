@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -61,21 +61,15 @@ using namespace std;
  */
 struct DirConfig {
 	enum Threeway { ENABLED, DISABLED, UNSET };
-	enum SpawnMethod { SM_UNSET, SM_SMART, SM_SMART_LV2, SM_CONSERVATIVE };
+	enum SpawnMethod { SM_UNSET, SM_SMART, SM_DIRECT };
 	
 	Threeway enabled;
 	
 	std::set<std::string> railsBaseURIs;
 	std::set<std::string> rackBaseURIs;
 	
-	/** Whether to autodetect Rails applications. */
-	Threeway autoDetectRails;
-	
-	/** Whether to autodetect Rack applications. */
-	Threeway autoDetectRack;
-	
-	/** Whether to autodetect WSGI applications. */
-	Threeway autoDetectWSGI;
+	/** The Ruby interpreter to use. */
+	const char *ruby;
 	
 	/** The environment (RAILS_ENV/RACK_ENV/WSGI_ENV) under which
 	 * applications should operate. */
@@ -103,18 +97,12 @@ struct DirConfig {
 	const char *group;
 	
 	/**
-	 * The idle timeout, in seconds, of Rails framework spawners.
-	 * May also be 0 (which indicates that the framework spawner should
-	 * never idle timeout) or -1 (which means that the value is not specified).
-	 */
-	long frameworkSpawnerTimeout;
-	
-	/**
-	 * The idle timeout, in seconds, of Rails application spawners.
+	 * The idle timeout, in seconds, of preloader processes.
 	 * May also be 0 (which indicates that the application spawner should
-	 * never idle timeout) or -1 (which means that the value is not specified).
+	 * never idle timeout) or -1 (which means that the value is not specified,
+	 * and the default value should be used).
 	 */
-	long appSpawnerTimeout;
+	long maxPreloaderIdleTime;
 	
 	/**
 	 * The maximum number of requests that the spawned application may process
@@ -145,9 +133,6 @@ struct DirConfig {
 	
 	/** Whether high performance mode should be turned on. */
 	Threeway highPerformance;
-	
-	/** Whether global queuing should be used. */
-	Threeway useGlobalQueue;
 	
 	/**
 	 * Whether encoded slashes in URLs should be supported. This however conflicts
@@ -204,7 +189,7 @@ struct DirConfig {
 		return enabled != DISABLED;
 	}
 	
-	string getAppRoot(const char *documentRoot) const {
+	string getAppRoot(const StaticString &documentRoot) const {
 		if (appRoot == NULL) {
 			if (resolveSymlinksInDocRoot == DirConfig::ENABLED) {
 				return extractDirName(resolveSymlink(documentRoot));
@@ -216,19 +201,7 @@ struct DirConfig {
 		}
 	}
 	
-	string getAppRoot(const string &documentRoot) const {
-		if (appRoot == NULL) {
-			if (resolveSymlinksInDocRoot == DirConfig::ENABLED) {
-				return extractDirName(resolveSymlink(documentRoot));
-			} else {
-				return extractDirName(documentRoot);
-			}
-		} else {
-			return appRoot;
-		}
-	}
-	
-	const char *getUser() const {
+	StaticString getUser() const {
 		if (user != NULL) {
 			return user;
 		} else {
@@ -236,7 +209,7 @@ struct DirConfig {
 		}
 	}
 	
-	const char *getGroup() const {
+	StaticString getGroup() const {
 		if (group != NULL) {
 			return group;
 		} else {
@@ -244,7 +217,7 @@ struct DirConfig {
 		}
 	}
 	
-	const char *getEnvironment() const {
+	StaticString getEnvironment() const {
 		if (environment != NULL) {
 			return environment;
 		} else {
@@ -252,7 +225,7 @@ struct DirConfig {
 		}
 	}
 	
-	string getAppGroupName(const string &appRoot) const {
+	StaticString getAppGroupName(const StaticString &appRoot) const {
 		if (appGroupName.empty()) {
 			return appRoot;
 		} else {
@@ -260,16 +233,14 @@ struct DirConfig {
 		}
 	}
 	
-	const char *getSpawnMethodString() const {
+	StaticString getSpawnMethodString() const {
 		switch (spawnMethod) {
 		case SM_SMART:
 			return "smart";
-		case SM_SMART_LV2:
-			return "smart-lv2";
-		case SM_CONSERVATIVE:
-			return "conservative";
+		case SM_DIRECT:
+			return "direct";
 		default:
-			return "smart-lv2";
+			return "smart";
 		}
 	}
 	
@@ -293,10 +264,6 @@ struct DirConfig {
 		return highPerformance == ENABLED;
 	}
 	
-	bool usingGlobalQueue() const {
-		return useGlobalQueue != DISABLED;
-	}
-	
 	bool allowsEncodedSlashes() const {
 		return allowEncodedSlashes == ENABLED;
 	}
@@ -309,7 +276,7 @@ struct DirConfig {
 		}
 	}
 	
-	const char *getRestartDir() const {
+	StaticString getRestartDir() const {
 		if (restartDir != NULL) {
 			return restartDir;
 		} else {
@@ -334,7 +301,7 @@ struct DirConfig {
 	}
 
 	bool getBufferResponse() const {
-		return bufferResponse != DISABLED;
+		return bufferResponse == ENABLED;
 	}
 	
 	string getUnionStationFilterString() const {
@@ -365,9 +332,6 @@ struct DirConfig {
  * the default value if the value is not specified.
  */
 struct ServerConfig {
-	/** The filename of the Ruby interpreter to use. */
-	const char *ruby;
-	
 	/** The Passenger root folder. */
 	const char *root;
 	
@@ -404,18 +368,14 @@ struct ServerConfig {
 	int unionStationGatewayPort;
 	string unionStationGatewayCert;
 	string unionStationProxyAddress;
-	string unionStationProxyType;
 	
 	/** Directory in which analytics logs should be saved. */
-	string analyticsLogDir;
 	string analyticsLogUser;
 	string analyticsLogGroup;
-	string analyticsLogPermissions;
 	
 	set<string> prestartURLs;
 	
 	ServerConfig() {
-		ruby               = "ruby";
 		root               = NULL;
 		logLevel           = DEFAULT_LOG_LEVEL;
 		debugLogFile       = NULL;
@@ -429,10 +389,8 @@ struct ServerConfig {
 		unionStationGatewayPort    = DEFAULT_UNION_STATION_GATEWAY_PORT;
 		unionStationGatewayCert    = string();
 		unionStationProxyAddress   = string();
-		unionStationProxyType      = string();
 		analyticsLogUser   = DEFAULT_ANALYTICS_LOG_USER;
 		analyticsLogGroup  = DEFAULT_ANALYTICS_LOG_GROUP;
-		analyticsLogPermissions = DEFAULT_ANALYTICS_LOG_PERMISSIONS;
 	}
 	
 	/** Called after the configuration files have been loaded, inside
@@ -457,29 +415,6 @@ struct ServerConfig {
 			}
 			
 			defaultGroup = groupEntry->gr_name;
-		}
-		
-		if (analyticsLogDir.empty() && geteuid() == 0) {
-			analyticsLogDir = "/var/log/passenger-analytics";
-		} else if (analyticsLogDir.empty()) {
-			struct passwd *user = getpwuid(geteuid());
-			string username;
-			
-			if (user == NULL) {
-				username = user->pw_name;
-			} else {
-				username = "user-" + toString(geteuid());
-			}
-			analyticsLogDir = string(getSystemTempDir()) +
-				"/passenger-analytics-logs." +
-				username;
-		}
-		
-		if (unionStationProxyType != ""
-		 && unionStationProxyType != "http"
-		 && unionStationProxyType != "socks5") {
-			throw ConfigurationException(string("The option 'UnionStationProxyType' ") +
-				"may only be set to 'http' or 'socks5'.");
 		}
 	}
 };

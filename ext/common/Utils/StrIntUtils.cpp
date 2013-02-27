@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -27,8 +27,10 @@
 #include <cstdlib>
 #include <cctype>
 #include <cmath>
-#include <Utils/utf8.h>
+#include <algorithm>
 #include <Exceptions.h>
+#include <Utils/utf8.h>
+#include <Utils/SystemTime.h>
 #include <Utils/StrIntUtils.h>
 
 namespace Passenger {
@@ -57,16 +59,18 @@ startsWith(const StaticString &str, const StaticString &substr) {
 }
 
 template<typename OutputString>
-void
+static void
 _split(const StaticString &str, char sep, vector<OutputString> &output) {
-	string::size_type start, pos;
-	start = 0;
 	output.clear();
-	while ((pos = str.find(sep, start)) != string::npos) {
-		output.push_back(str.substr(start, pos - start));
-		start = pos + 1;
+	if (!str.empty()) {
+		string::size_type start, pos;
+		start = 0;
+		while ((pos = str.find(sep, start)) != string::npos) {
+			output.push_back(str.substr(start, pos - start));
+			start = pos + 1;
+		}
+		output.push_back(str.substr(start));
 	}
-	output.push_back(str.substr(start));
 }
 
 void
@@ -77,6 +81,44 @@ split(const StaticString &str, char sep, vector<string> &output) {
 void
 split(const StaticString &str, char sep, vector<StaticString> &output) {
 	_split(str, sep, output);
+}
+
+template<typename OutputString>
+static void
+_splitIncludeSep(const StaticString &str, char sep, vector<OutputString> &output) {
+	output.clear();
+	if (!str.empty()) {
+		string::size_type start, pos;
+		start = 0;
+		while ((pos = str.find(sep, start)) != string::npos) {
+			output.push_back(str.substr(start, pos - start + 1));
+			start = pos + 1;
+		}
+		if (start != str.size()) {
+			output.push_back(str.substr(start));
+		}
+	}
+}
+
+void
+splitIncludeSep(const StaticString &str, char sep, vector<string> &output) {
+	_splitIncludeSep(str, sep, output);
+}
+
+void
+splitIncludeSep(const StaticString &str, char sep, vector<StaticString> &output) {
+	_splitIncludeSep(str, sep, output);
+}
+
+string
+replaceString(const string &str, const string &toFind, const string &replaceWith) {
+	string::size_type pos = str.find(toFind);
+	if (pos == string::npos) {
+		return str;
+	} else {
+		string result(str);
+		return result.replace(pos, toFind.size(), replaceWith);
+	}
 }
 
 string
@@ -320,6 +362,68 @@ atol(const string &s) {
 	return ::atol(s.c_str());
 }
 
+bool
+constantTimeCompare(const StaticString &a, const StaticString &b) {
+	// http://blog.jasonmooberry.com/2010/10/constant-time-string-comparison/
+	// See also ActiveSupport::MessageVerifier#secure_compare.
+	if (a.size() != b.size()) {
+		return false;
+	} else {
+		const char *x = a.data();
+		const char *y = b.data();
+		const char *end = a.data() + a.size();
+		int result = 0;
+
+		while (x < end) {
+			result |= *x ^ *y;
+			x++;
+			y++;
+		}
+
+		return result == 0;
+	}
+}
+
+string
+distanceOfTimeInWords(time_t fromTime, time_t toTime) {
+	time_t seconds;
+	stringstream result;
+	if (toTime == 0) {
+		toTime = SystemTime::get();
+	}
+	if (fromTime < toTime) {
+		seconds = toTime - fromTime;
+	} else {
+		seconds = fromTime - toTime;
+	}
+	
+	if (seconds >= 60) {
+		time_t minutes = seconds / 60;
+		if (minutes >= 60) {
+			time_t hours = minutes / 60;
+			minutes = minutes % 60;
+			result << hours << "h ";
+		}
+		
+		seconds = seconds % 60;
+		result << minutes << "m ";
+	}
+	result << seconds << "s";
+	return result.str();
+}
+
+char *
+appendData(char *pos, const char *end, const char *data, size_t size) {
+	size_t maxToCopy = std::min<size_t>(end - pos, size);
+	memcpy(pos, data, maxToCopy);
+	return pos + size;
+}
+
+char *
+appendData(char *pos, const char *end, const StaticString &data) {
+	return appendData(pos, end, data.data(), data.size());
+}
+
 string
 cEscapeString(const StaticString &input) {
 	string result;
@@ -406,6 +510,16 @@ escapeHTML(const StaticString &input) {
 		}
 	}
 	return result;
+}
+
+StaticString
+makeStaticStringWithNull(const char *data) {
+	return StaticString(data, strlen(data) + 1);
+}
+
+StaticString
+makeStaticStringWithNull(const string &data) {
+	return StaticString(data.c_str(), data.size() + 1);
 }
 
 } // namespace Passenger

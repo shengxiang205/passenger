@@ -1,7 +1,124 @@
+Release 3.9.4 (4.0.0 release candidate 2)
+-----------------------------------------
+
+ * More bug fixes.
+ * More documentation updates.
+ * Better crash diagnostics.
+
+
+Release 3.9.3 (4.0.0 release candidate 1)
+-----------------------------------------
+
+ * The Nginx version now supports the `passenger_app_root` configuration option.
+ * The Enterprise memory limiting feature has been extended to work with non-Ruby applications as well.
+ * Application processes that have been killed are now automatically detected within 5 seconds. Previously Phusion Passenger needed to send a request to the process before detecting that it's gone. This change means that when you kill a process by sending it a signal, Phusion Passenger will automatically respawn it within 5 seconds (provided that the process limit settings allow respawning).
+ * Phusion Passenger Standalone's HTTP client body limit has been raised from 50 MB to 1 GB.
+ * Python 3 support has been added.
+ * The build system has been made compatible with JRuby and Ruby 2.0.
+ * The installers now print a lot more information about detected system settings so that the user can see  whether something has been wrongly detected.
+ * Some performance optimizations. These involve further extending the zero-copy architecture, and the use of hash table maps instead of binary tree maps.
+ * Many potential crasher and freezer bugs have been fixed.
+ * Error diagnostics have been further improved.
+ * Many documentation improvements.
+
+
+Release 3.9.2 (4.0.0 beta 2)
+----------------------------
+
+ * New feature: JRuby and Rubinius support.
+ * New feature: Out of Band Work.
+ * Sending SIGBART to a Ruby process will now trigger the same behavior
+   as SIGQUIT - that is, it will print a backtrace. This is necessary
+   for proper JRuby support because JRuby cannot catch SIGQUIT.
+ * Rolling restarts and depoyment error resistance are now also available
+   in Phusion Passenger Standalone in the Enterprise version.
+ * System call failure simulation framework.
+ * Improved crash reporting.
+ * Many documentation improvements.
+ * Many bug fixes.
+
+
+Release 3.9.1 (4.0.0 beta 1)
+----------------------------
+
+This is the first beta of Phusion Passenger 4. The changes are numerous.
+
+ * Support for multiple Ruby versions.
+ * The internals now use evented I/O.
+ * Real-time response buffering.
+ * Improved zero-copy architecture.
+ * Rewritten ApplicationPool and process spawning subsystem.
+ * Multithreading within Ruby apps (Phusion Passenger Enterprise only).
+ * Python WSGI support lifted to "beta" status.
+ * More protection against stuck processes.
+ * Automatically picks up environment variables from your bashrc.
+ * Allows setting environment variables directly in Apache.
+ * Automatic asset pipeline support in Standalone.
+ * Deleting restart.txt no longer triggers a restart.
+ * More stable Union Station support.
+ * Many internal robustness improvements.
+ * Better relocatability without wasting space.
+
+
+Release 3.0.19
+--------------
+
+ * Nginx security fix: do not display Nginx version when
+   server_tokens are off.
+ * Fixed compilation problems on some systems.
+ * Fixed some Union Station-related bugs.
+
+
+Release 3.0.18
+--------------
+
+ * Fixed compilation problems on Fedora 17.
+ * Fixed Union Station compatibility with Rails 3.2.
+ * Phusion Passenger Enterprise Standalone now supports rolling
+   restarts and deployment error resistance.
+
+
+Release 3.0.17
+--------------
+
+ * Fixed a Ruby 1.9 encoding-related bug in the memory measurer.
+   (Phusion Passenger Enterprise)
+ * Fixed OOM adjustment bugs on Linux.
+ * Fixed compilation problems on Fedora 18 and 19.
+ * Fixed compilation problems on SunOS.
+ * Fixed compilation problems on AIX. Contribution by Perry Smith.
+ * Fixed various compilation warnings.
+ * Upgraded preferred Nginx version to 1.2.3.
+
+3.0.16 was an unofficial hotfix release, and so its announcement had been skipped.
+
+
+Release 3.0.15
+--------------
+
+ * Updated documentation.
+ * Updated website links.
+
+
+Release 3.0.14
+--------------
+
+ * [Apache] Fixed a long-standing mod_rewrite-related problem.
+   Some mod_rewrite rules would not work, but it depends on the exact
+   mod_rewrite configuration so it would work for some people but not
+   for others. Issue #563. Thanks a lot to cedricmaion for providing
+   information on the nature of the bug and to peter.nash55 for
+   providing a VM that allowed us to reproduce the problem.
+ * [Nginx] Preferred Nginx version to 1.2.2.
+   The previously preferred version was 1.2.1.
+ * Cleared some confusing terminology in the documentation.
+ * Fixed some Ruby 1.9 encoding problems.
+
+
 Release 3.0.13
 --------------
 
- * [Nginx] Preferred Nginx version upgraded to 1.2.0.
+ * [Nginx] Preferred Nginx version upgraded to 1.2.1.
  * Fixed compilation problems on FreeBSD 6.4. Fixes issue #766.
  * Fixed compilation problems on GCC >= 4.6.
  * Fixed compilation problems on OpenIndiana and Solaris 11. Fixes issue #742.

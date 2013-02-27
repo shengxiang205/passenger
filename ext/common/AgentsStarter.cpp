@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2012 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -56,13 +56,12 @@ agents_starter_start(AgentsStarter *as,
                      unsigned int maxInstancesPerApp,
                      unsigned int poolIdleTime,
                      const char *analyticsServer,
-                     const char *analyticsLogDir, const char *analyticsLogUser,
-                     const char *analyticsLogGroup, const char *analyticsLogPermissions,
+                     const char *analyticsLogUser,
+                     const char *analyticsLogGroup,
                      const char *unionStationGatewayAddress,
                      unsigned short unionStationGatewayPort,
                      const char *unionStationGatewayCert,
                      const char *unionStationProxyAddress,
-                     const char *unionStationProxyType,
                      const char **prestartURLs, unsigned int prestartURLsCount,
                      const AfterForkCallback afterFork,
                      void *callbackArgument,
@@ -88,13 +87,11 @@ agents_starter_start(AgentsStarter *as,
 			passengerRoot, rubyCommand,
 			maxPoolSize, maxInstancesPerApp, poolIdleTime,
 			analyticsServer,
-			analyticsLogDir, analyticsLogUser,
-			analyticsLogGroup, analyticsLogPermissions,
+			analyticsLogUser, analyticsLogGroup,
 			unionStationGatewayAddress,
 			unionStationGatewayPort,
 			unionStationGatewayCert,
 			unionStationProxyAddress,
-			unionStationProxyType,
 			setOfprestartURLs,
 			afterForkFunctionObject);
 		return 1;

@@ -1,4 +1,4 @@
-#  Phusion Passenger - http://www.modrails.com/
+#  Phusion Passenger - https://www.phusionpassenger.com/
 #  Copyright (c) 2010, 2011, 2012 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
@@ -42,55 +42,55 @@ module Packaging
 	
 	SUPER_USER_EXECUTABLES = [
 		'passenger-status',
-		'passenger-memory-stats',
-		'passenger-make-enterprisey'
+		'passenger-memory-stats'
 	]
 	
 	# A list of globs which match all files that should be packaged
 	# in the Phusion Passenger gem or tarball.
 	GLOB = [
+		'.travis.yml',
 		'configure',
 		'Rakefile',
-		'README',
-		'DEVELOPERS.TXT',
-		'PACKAGING.TXT',
+		'README.md',
+		'CONTRIBUTING.md',
 		'LICENSE',
-		'INSTALL',
+		'INSTALL.md',
 		'NEWS',
+		'passenger.gemspec',
 		'build/*.rb',
 		'lib/*.rb',
 		'lib/**/*.rb',
 		'lib/**/*.py',
-		'lib/phusion_passenger/templates/*',
-		'lib/phusion_passenger/templates/apache2/*',
-		'lib/phusion_passenger/templates/nginx/*',
-		'lib/phusion_passenger/templates/standalone/*',
-		'lib/phusion_passenger/templates/standalone_default_root/*',
 		'bin/*',
 		'doc/**/*',
 		'man/*',
 		'debian/*',
 		'helper-scripts/*',
-		'ext/common/**/*.{cpp,c,h,hpp}',
+		'ext/common/**/*.{cpp,c,h,hpp,md}',
 		'ext/apache2/*.{cpp,h,hpp,c}',
 		'ext/nginx/*.{c,cpp,h}',
 		'ext/nginx/config',
 		'ext/boost/**/*',
-		'ext/google/**/*',
 		'ext/libev/{LICENSE,Changes,README,Makefile.am,Makefile.in}',
 		'ext/libev/{*.m4,autogen.sh,config.guess,config.h.in,config.sub}',
-		'ext/libev/{configure,configure.ac,install-sh,ltmain.sh,missing,mkinstalldirs}',
+		'ext/libev/{configure,configure.ac,depcomp,install-sh,ltmain.sh,missing,mkinstalldirs}',
 		'ext/libev/{*.h,*.c}',
+		'ext/libeio/{LICENSE,Changes,README,Makefile.am,Makefile.in}',
+		'ext/libeio/{*.m4,autogen.sh,config.guess,config.h.in,config.sub}',
+		'ext/libeio/{configure,configure.ac,install-sh,ltmain.sh,missing,mkinstalldirs}',
+		'ext/libeio/{*.h,*.c}',
 		'ext/oxt/*.hpp',
 		'ext/oxt/*.cpp',
 		'ext/oxt/detail/*.hpp',
 		'ext/ruby/*.{c,rb}',
 		'dev/*',
-		'resources/*',
+		'resources/**/*',
+		'test/.rspec',
 		'test/*.example',
+		'test/*.travis',
 		'test/support/*.{c,cpp,h,rb}',
 		'test/tut/*',
-		'test/cxx/*.{cpp,h}',
+		'test/cxx/**/*.{cpp,h}',
 		'test/oxt/*.{cpp,hpp}',
 		'test/ruby/**/*',
 		'test/integration_tests/**/*',

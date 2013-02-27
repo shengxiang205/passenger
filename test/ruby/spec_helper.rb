@@ -5,25 +5,31 @@ end
 source_root = File.expand_path(File.dirname(__FILE__) + "/../..")
 Dir.chdir("#{source_root}/test")
 
-require 'yaml'
+require 'rubygems'
+require 'json'
 begin
-	CONFIG = YAML::load_file('config.yml')
+	CONFIG = JSON.load(File.read('config.json'))
 rescue Errno::ENOENT
-	STDERR.puts "*** You do not have the file test/config.yml. " <<
-		"Please copy test/config.yml.example to " <<
-		"test/config.yml, and edit it."
+	STDERR.puts "*** You do not have the file test/config.json. " <<
+		"Please copy test/config.json.example to " <<
+		"test/config.json, and edit it."
 	exit 1
 end
 
+DEBUG      = ['1', 'y', 'yes'].include?(ENV['DEBUG'].to_s.downcase)
 AGENTS_DIR = "#{source_root}/agents"
 
 $LOAD_PATH.unshift("#{source_root}/lib")
 $LOAD_PATH.unshift("#{source_root}/test")
 
+require 'thread'
+require 'timeout'
 require 'fileutils'
 require 'support/test_helper'
 require 'phusion_passenger'
+PhusionPassenger.locate_directories
 require 'phusion_passenger/debug_logging'
+require 'phusion_passenger/utils'
 require 'phusion_passenger/utils/tmpdir'
 
 include TestHelper
@@ -33,11 +39,56 @@ include TestHelper
 srand
 
 trap "QUIT" do
-	puts caller
+	STDERR.puts PhusionPassenger::Utils.global_backtrace_report
 end
 
-Spec::Runner.configure do |config|
-	config.append_before do
+class DeadlineTimer
+	def initialize(main_thread, deadline)
+		@mutex = Mutex.new
+		@cond  = ConditionVariable.new
+		@iteration = 0
+		@pipe  = IO.pipe
+
+		@thread = Thread.new do
+			Thread.current.abort_on_exception = true
+			expected_iteration = 1
+			ios = [@pipe[0]]
+			while true
+				@mutex.synchronize do
+					while @iteration != expected_iteration
+						@cond.wait(@mutex)
+					end
+				end
+				if !select(ios, nil, nil, deadline)
+					STDERR.puts "*** Test timed out (#{deadline} seconds)"
+					STDERR.puts PhusionPassenger::Utils.global_backtrace_report
+					main_thread.raise(Timeout::Error, "Test timed out")
+					expected_iteration += 1
+				elsif @pipe[0].read(1).nil?
+					break
+				else
+					expected_iteration += 1
+				end
+			end
+		end
+	end
+
+	def start
+		@mutex.synchronize do
+			@iteration += 1
+			@cond.signal
+		end
+	end
+
+	def stop
+		@pipe[1].write('x')
+	end
+end
+
+DEADLINE_TIMER = DeadlineTimer.new(Thread.current, 30)
+
+RSpec.configure do |config|
+	config.before(:each) do
 		# Suppress warning messages.
 		PhusionPassenger::DebugLogging.log_level = -1
 		PhusionPassenger::DebugLogging.log_file = nil
@@ -45,60 +96,15 @@ Spec::Runner.configure do |config|
 		
 		# Create the temp directory.
 		PhusionPassenger::Utils.passenger_tmpdir
+
+		DEADLINE_TIMER.start
 	end
 	
-	config.append_after do
+	config.after(:each) do
 		tmpdir = PhusionPassenger::Utils.passenger_tmpdir(false)
 		if File.exist?(tmpdir)
 			remove_dir_tree(tmpdir)
 		end
-	end
-end
-
-module SpawnerSpecHelper
-	def self.included(klass)
-		klass.before(:each) do
-			@stubs = []
-			@apps = []
-		end
-		
-		klass.after(:each) do
-			begin
-				@apps.each do |app|
-					app.close
-				end
-				# Wait until all apps have exited, so that they don't
-				# hog memory for the next test case.
-				eventually(5) do
-					@apps.all? do |app|
-						!PhusionPassenger::Utils.process_is_alive?(app.pid)
-					end
-				end
-			ensure
-				@stubs.each do |stub|
-					stub.destroy
-				end
-			end
-		end
-	end
-	
-	def before_start(code)
-		@before_start = code
-	end
-	
-	def after_start(code)
-		@after_start = code
-	end
-	
-	def register_stub(stub)
-		@stubs << stub
-		File.prepend(stub.startup_file, "#{@before_start}\n")
-		File.append(stub.startup_file, "\n#{@after_start}")
-		return stub
-	end
-	
-	def register_app(app)
-		@apps << app
-		return app
+		DEADLINE_TIMER.stop
 	end
 end

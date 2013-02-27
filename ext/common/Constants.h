@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010, 2011, 2012 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -26,7 +26,7 @@
 #define _PASSENGER_CONSTANTS_H_
 
 /* Don't forget to update lib/phusion_passenger.rb too. */
-#define PASSENGER_VERSION "3.0.13"
+#define PASSENGER_VERSION "3.9.4.rc2"
 
 #define FEEDBACK_FD 3
 
@@ -44,5 +44,7 @@
 #define MESSAGE_SERVER_MAX_USERNAME_SIZE 100
 #define MESSAGE_SERVER_MAX_PASSWORD_SIZE 100
 #define DEFAULT_BACKEND_ACCOUNT_RIGHTS Account::DETACH
+
+#define POOL_HELPER_THREAD_STACK_SIZE (1024 * 256)
 
 #endif /* _PASSENGER_CONSTANTS_H */

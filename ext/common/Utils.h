@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -46,6 +46,9 @@ namespace Passenger {
 
 using namespace std;
 using namespace boost;
+
+#define foreach         BOOST_FOREACH
+#define reverse_foreach BOOST_REVERSE_FOREACH
 
 static const uid_t USER_NOT_GIVEN = (uid_t) -1;
 static const gid_t GROUP_NOT_GIVEN = (gid_t) -1;
@@ -160,20 +163,32 @@ string canonicalizePath(const string &path);
  * If <em>path</em> doesn't refer to a symlink then this method will return
  * <em>path</em>.
  *
+ * <em>path</em> MUST be null-terminated!
+ *
  * @throws FileSystemException Something went wrong.
  * @ingroup Support
  */
-string resolveSymlink(const string &path);
+string resolveSymlink(const StaticString &path);
 
 /**
  * Given a path, extracts its directory name.
+ * <em>path</em> MUST be null-terminated!
  *
  * @ingroup Support
  */
 string extractDirName(const StaticString &path);
 
 /**
+ * Given a path, extracts its directory name. This version does not use
+ * any dynamically allocated storage and does not require `path` to be
+ * NULL-terminated. It returns a StaticString that points either to static
+ * storage, or to a substring of `path`.
+ */
+StaticString extractDirNameStatic(const StaticString &path);
+
+/**
  * Given a path, extracts its base name.
+ * <em>path</em> MUST be null-terminated!
  *
  * @ingroup Support
  */
@@ -215,6 +230,12 @@ string getProcessUsername();
  * @throws InvalidModeStringException The mode string cannot be parsed.
  */
 mode_t parseModeString(const StaticString &mode);
+
+/**
+ * Turns the given path into an absolute path. Unlike realpath(), this function does
+ * not resolve symlinks.
+ */
+string absolutizePath(const StaticString &path, const StaticString &workingDir = "");
 
 /**
  * Return the path name for the directory in which the system stores general
@@ -297,7 +318,7 @@ void makeDirTree(const string &path, const StaticString &mode = "u=rwx,g=,o=",
  * Remove an entire directory tree recursively. If the directory doesn't exist then this
  * function does nothing.
  *
- * @throws FileSystemException Something went wrong.
+ * @throws RuntimeException Something went wrong.
  */
 void removeDirTree(const string &path);
 
@@ -377,11 +398,28 @@ string getSignalName(int sig);
 void resetSignalHandlersAndMask();
 
 /**
+ * Disables malloc() debugging facilities on OS X.
+ */
+void disableMallocDebugging();
+
+/**
+ * Like system(), but properly resets the signal handler mask,
+ * disables malloc debugging and closes file descriptors > 2.
+ * _command_ must be null-terminated.
+ */
+int runShellCommand(const StaticString &command);
+
+/**
  * Close all file descriptors that are higher than <em>lastToKeepOpen</em>.
  * This function is async-signal safe. But make sure there are no other
  * threads running that might open file descriptors!
  */
 void closeAllFileDescriptors(int lastToKeepOpen);
+
+/**
+ * A no-op, but usually set as a breakpoint in gdb. See CONTRIBUTING.md.
+ */
+void breakpoint();
 
 
 /**

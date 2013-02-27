@@ -1,5 +1,5 @@
-#  Phusion Passenger - http://www.modrails.com/
-#  Copyright (c) 2010 Phusion
+#  Phusion Passenger - https://www.phusionpassenger.com/
+#  Copyright (c) 2010-2013 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -40,6 +40,7 @@ module Rails3Extensions
 class AnalyticsLogging < ActiveSupport::LogSubscriber
 	def self.install!(options)
 		analytics_logger = options["analytics_logger"]
+		app_group_name = options["app_group_name"]
 		return false if !analytics_logger || !options["analytics"]
 		
 		# If the Ruby interpreter supports GC statistics then turn it on
@@ -53,11 +54,22 @@ class AnalyticsLogging < ActiveSupport::LogSubscriber
 			ActiveSupport::Cache::Store.instrument = true
 			AnalyticsLogging.attach_to(:active_support, subscriber)
 		end
+		PhusionPassenger.on_event(:starting_request_handler_thread) do
+			if defined?(ActiveSupport::Cache::Store)
+				# This flag is thread-local.
+				ActiveSupport::Cache::Store.instrument = true
+			end
+		end
 		
-		if defined?(ActionDispatch::ShowExceptions)
+		if defined?(ActionDispatch::DebugExceptions)
+			exceptions_middleware = ActionDispatch::DebugExceptions
+		elsif defined?(ActionDispatch::ShowExceptions)
+			exceptions_middleware = ActionDispatch::ShowExceptions
+		end
+		if exceptions_middleware
 			Rails.application.middleware.insert_after(
-				ActionDispatch::ShowExceptions,
-				ExceptionLogger, analytics_logger)
+				exceptions_middleware,
+				ExceptionLogger, analytics_logger, app_group_name)
 		end
 		
 		if defined?(ActionController::Base)
@@ -85,9 +97,8 @@ class AnalyticsLogging < ActiveSupport::LogSubscriber
 	end
 	
 	def sql(event)
-		log = Thread.current[PASSENGER_ANALYTICS_WEB_LOG]
-		if log
-			name = event.payload[:name]
+		if log = Thread.current[PASSENGER_ANALYTICS_WEB_LOG]
+			name = event.payload[:name] || "SQL"
 			sql = event.payload[:sql]
 			digest = Digest::MD5.hexdigest("#{name}\0#{sql}\0#{rand}")
 			log.measured_time_points("DB BENCHMARK: #{digest}",
@@ -113,9 +124,10 @@ class AnalyticsLogging < ActiveSupport::LogSubscriber
 	end
 	
 	class ExceptionLogger
-		def initialize(app, analytics_logger)
+		def initialize(app, analytics_logger, app_group_name)
 			@app = app
 			@analytics_logger = analytics_logger
+			@app_group_name = app_group_name
 		end
 		
 		def call(env)
@@ -128,7 +140,7 @@ class AnalyticsLogging < ActiveSupport::LogSubscriber
 	private
 		def log_analytics_exception(env, exception)
 			log = @analytics_logger.new_transaction(
-				env[PASSENGER_GROUP_NAME],
+				@app_group_name,
 				:exceptions,
 				env[PASSENGER_UNION_STATION_KEY])
 			begin
