@@ -116,13 +116,7 @@ sessions compared to the others, then there might be a problem:
                                +---- "spike"
 --------------------------------
 
-Possible reasons why spikes can occur:
-
-. Your application is busy processing a request that takes a very long time.
-  If this is the case, then you might want to turn
-  <<PassengerUseGlobalQueue,global queuing>> on.
-. Your application is frozen, i.e. has stopped responding. See
-  <<debugging_frozen,Debugging frozen applications>> for tips.
+The most likely reason why a spike occurs is because your application is frozen, i.e. it has stopped responding. See <<debugging_frozen,Debugging frozen applications>> for tips.
 
 
 [[debugging_frozen]]
@@ -199,3 +193,9 @@ through the 'X-Passenger-Connect-Password' HTTP header, like this:
 -------------------------------------------
 bash# curl -H "X-Passenger-Connect-Password: nFfVOX1F8LjZ90HJh28Sd_htJOsgRsNne2QXKf8NIXw" http://127.0.0.1:58122/
 -------------------------------------------
+
+=== Attaching an IRB console to an application process ===
+:version: 3.0.0
+include::enterprise_only.txt[]
+
+You can attach an IRB console to any application process and inspect its state by executing arbitrary Ruby code. Do this by invoking `passenger-irb <PID>` where '<PID>' is the PID of the application process you wish to inspect. Note that the IRB console is currently only available for Ruby apps, not for apps in any other languages.

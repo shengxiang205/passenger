@@ -1,4 +1,4 @@
-#  Phusion Passenger - http://www.modrails.com/
+#  Phusion Passenger - https://www.phusionpassenger.com/
 #  Copyright (c) 2010, 2011, 2012 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
@@ -56,3 +56,36 @@ Packaging::ASCII_DOCS.each do |target|
 		sh "rm -f '#{target}'"
 	end
 end
+
+def create_markdown_compilation_task(target)
+	source = target.sub(/\.html$/, '.txt.md')
+	dependencies = [
+		source,
+		'doc/templates/markdown.html.erb',
+		'doc/templates/bootstrap.min.css'
+	]
+
+	file(target => dependencies) do
+		sh "bluecloth -f #{source} > #{target}.tmp"
+		begin
+			puts "Creating #{target}"
+			require 'erb'
+			template = ERB.new(File.read('doc/templates/markdown.html.erb'))
+			title    = File.basename(target, '.html')
+			content  = File.read("#{target}.tmp")
+			css      = File.read('doc/templates/bootstrap.min.css')
+			data = template.result(binding)
+			File.open(target, 'w') do |f|
+				f.write(data)
+			end
+		ensure
+			sh "rm -f #{target}.tmp"
+		end
+	end
+
+	task :clean do
+		sh "rm -f #{target}"
+	end
+end
+
+create_markdown_compilation_task('doc/Packaging.html')

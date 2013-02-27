@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -28,11 +28,14 @@
 #include <string>
 #include <vector>
 #include <sstream>
-#include "StaticString.h"
+#include <cstddef>
+#include <ctime>
+#include <StaticString.h>
 
 namespace Passenger {
 
 using namespace std;
+
 
 /**
  * Given a prefix string, a middle string and a postfix string, try to build a string
@@ -64,7 +67,8 @@ string fillInMiddle(unsigned int max, const string &prefix, const string &middle
 bool startsWith(const StaticString &str, const StaticString &substr);
 
 /**
- * Split the given string using the given separator.
+ * Split the given string using the given separator. Excludes the
+ * separator from the output.
  *
  * @param str The string to split.
  * @param sep The separator to use.
@@ -72,6 +76,23 @@ bool startsWith(const StaticString &str, const StaticString &substr);
  */
 void split(const StaticString &str, char sep, vector<string> &output);
 void split(const StaticString &str, char sep, vector<StaticString> &output);
+
+/**
+ * Split the given string using the given separator. Includes the
+ * separator in the output, at the end of an item.
+ *
+ * @param str The string to split.
+ * @param sep The separator to use.
+ * @param output The vector to write the output to.
+ */
+void splitIncludeSep(const StaticString &str, char sep, vector<string> &output);
+void splitIncludeSep(const StaticString &str, char sep, vector<StaticString> &output);
+
+/**
+ * Look for 'toFind' inside 'str', replace it with 'replaceWith' and return the result.
+ * Only the first occurence of 'toFind' is replaced.
+ */
+string replaceString(const string &str, const string &toFind, const string &replaceWith);
 
 /**
  * Convert anything to a string.
@@ -217,6 +238,20 @@ roundUp(IntegerType number, IntegerType multiple) {
 }
 
 /**
+ * Compare two strings using a constant time algorithm to avoid timing attacks.
+ */
+bool constantTimeCompare(const StaticString &a, const StaticString &b);
+
+string distanceOfTimeInWords(time_t fromTime, time_t toTime = 0);
+
+/**
+ * Append the given data to the address at 'pos', but do not cross 'end'.
+ * Returns the end of the appended string.
+ */
+char *appendData(char *pos, const char *end, const char *data, size_t size);
+char *appendData(char *pos, const char *end, const StaticString &data);
+
+/**
  * Escape non-ASCII-printable characters in the given string with C-style escape sequences,
  * e.g. "foo\nbar\0" becomes "foo\\nbar\\0".
  */
@@ -229,6 +264,10 @@ string cEscapeString(const StaticString &input);
  * @throws utf8::exception A UTF-8 decoding error occurred.
  */
 string escapeHTML(const StaticString &input);
+
+StaticString makeStaticStringWithNull(const char *data);
+
+StaticString makeStaticStringWithNull(const string &data);
 
 } // namespace Passenger
 

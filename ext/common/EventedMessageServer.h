@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010, 2011 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010, 2011, 2012 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -29,14 +29,12 @@
 #include <ev++.h>
 #include <cstdarg>
 #include <cstdlib>
-#ifdef HAS_ALLOCA_H
-	#include <alloca.h>
-#endif
-#include "EventedServer.h"
-#include "MessageReadersWriters.h"
-#include "AccountsDatabase.h"
-#include "Constants.h"
-#include "Utils.h"
+#include <EventedServer.h>
+#include <MessageReadersWriters.h>
+#include <AccountsDatabase.h>
+#include <Constants.h>
+#include <Utils.h>
+#include <Utils/SmallVector.h>
 
 namespace Passenger {
 
@@ -83,42 +81,27 @@ public:
 	
 	void writeArrayMessage(const char *name, ...) {
 		va_list ap;
-		unsigned int count = 0;
+		SmallVector<StaticString, 10> args;
+		const char *arg;
 		
+		args.push_back(name);
 		va_start(ap, name);
-		while (va_arg(ap, const char *) != NULL) {
-			count++;
+		while ((arg = va_arg(ap, const char *)) != NULL) {
+			args.push_back(arg);
 		}
 		va_end(ap);
 		
-		StaticString *args = (StaticString *)
-			alloca((count + 1) * sizeof(StaticString));
-		unsigned int i = 1;
-		
-		args[0] = name;
-		va_start(ap, name);
-		while (true) {
-			const char *arg = va_arg(ap, const char *);
-			if (arg != NULL) {
-				args[i] = arg;
-				i++;
-			} else {
-				break;
-			}
-		}
-		va_end(ap);
-		
-		writeArrayMessage(args, count + 1);
+		writeArrayMessage(&args[0], args.size());
 	}
 	
 	void writeArrayMessage(StaticString args[], unsigned int count) {
 		char headerBuf[sizeof(uint16_t)];
 		unsigned int outSize = ArrayMessage::outputSize(count);
-		StaticString *out = (StaticString *)
-			alloca(outSize * sizeof(StaticString));
+		SmallVector<StaticString, 10> out;
+		out.reserve(outSize);
 		
-		ArrayMessage::generate(args, count, headerBuf, out, outSize);
-		write(out, outSize);
+		ArrayMessage::generate(args, count, headerBuf, &out[0], outSize);
+		write(&out[0], outSize);
 	}
 };
 

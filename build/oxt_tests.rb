@@ -1,4 +1,4 @@
-#  Phusion Passenger - http://www.modrails.com/
+#  Phusion Passenger - https://www.phusionpassenger.com/
 #  Copyright (c) 2010 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
@@ -25,6 +25,7 @@
 
 TEST_OXT_CFLAGS = "-I../../ext -I../support #{TEST_COMMON_CFLAGS}"
 TEST_OXT_LDFLAGS = "#{TEST_BOOST_OXT_LIBRARY} #{PlatformInfo.portability_ldflags} #{EXTRA_LDFLAGS}"
+TEST_OXT_LDFLAGS << " -faddress-sanitizer" if USE_ASAN
 TEST_OXT_OBJECTS = {
 	'oxt_test_main.o' => %w(oxt_test_main.cpp),
 	'backtrace_test.o' => %w(backtrace_test.cpp counter.hpp),

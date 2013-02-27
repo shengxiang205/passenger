@@ -1,5 +1,5 @@
 # encoding: binary
-#  Phusion Passenger - http://www.modrails.com/
+#  Phusion Passenger - https://www.phusionpassenger.com/
 #  Copyright (c) 2010 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
@@ -87,8 +87,8 @@ class MessageClient
 		end
 	end
 	
-	def status
-		write("inspect")
+	def status(options = {})
+		write("inspect", *options.to_a.flatten)
 		check_security_response
 		return read_scalar
 	rescue

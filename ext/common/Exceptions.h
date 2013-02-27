@@ -1,6 +1,6 @@
 /*
- *  Phusion Passenger - http://www.modrails.com/
- *  Copyright (c) 2010 Phusion
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -27,8 +27,10 @@
 
 #include <oxt/tracable_exception.hpp>
 #include <string>
+#include <map>
 #include <sstream>
 #include <cstring>
+#include <cassert>
 
 /**
  * @defgroup Exceptions Exceptions
@@ -68,7 +70,7 @@ public:
 	SystemException(const string &briefMessage, int errorCode) {
 		stringstream str;
 		
-		str << strerror(errorCode) << " (" << errorCode << ")";
+		str << strerror(errorCode) << " (errno=" << errorCode << ")";
 		systemMessage = str.str();
 		
 		setBriefMessage(briefMessage);
@@ -201,51 +203,123 @@ public:
  * HTML page with details about the error.
  */
 class SpawnException: public oxt::tracable_exception {
+public:
+	enum ErrorKind {
+		UNDEFINED_ERROR,
+		PRELOADER_STARTUP_PROTOCOL_ERROR,
+		PRELOADER_STARTUP_TIMEOUT,
+		PRELOADER_STARTUP_EXPLAINABLE_ERROR,
+		APP_STARTUP_PROTOCOL_ERROR,
+		APP_STARTUP_TIMEOUT,
+		APP_STARTUP_EXPLAINABLE_ERROR
+	};
+	
 private:
+	ErrorKind errorKind;
 	string msg;
 	bool m_hasErrorPage;
 	bool m_isHTML;
 	string m_errorPage;
+	string preloaderCommand;
+	map<string, string> annotations;
+	
 public:
-	SpawnException(const string &message)
-		: msg(message) {
+	SpawnException(const string &message, ErrorKind errorKind = UNDEFINED_ERROR)
+		: msg(message)
+	{
+		this->errorKind = errorKind;
 		m_hasErrorPage = false;
 		m_isHTML = false;
 	}
 	
-	SpawnException(const string &message, const string &errorPage, bool isHTML = true)
+	SpawnException(const string &message, const string &errorPage,
+		bool isHTML = true, ErrorKind errorKind = UNDEFINED_ERROR)
 		: msg(message), m_errorPage(errorPage)
 	{
+		assert(!isHTML
+			|| errorKind == UNDEFINED_ERROR
+			|| errorKind == PRELOADER_STARTUP_EXPLAINABLE_ERROR
+			|| errorKind == APP_STARTUP_EXPLAINABLE_ERROR);
+		this->errorKind = errorKind;
 		m_hasErrorPage = true;
 		m_isHTML = isHTML;
 	}
 	
 	virtual ~SpawnException() throw() {}
-	virtual const char *what() const throw() { return msg.c_str(); }
 	
-	/**
-	 * Check whether an error page is available.
-	 */
+	virtual const char *what() const throw() {
+		return msg.c_str();
+	}
+	
 	bool hasErrorPage() const {
 		return m_hasErrorPage;
 	}
 	
-	/**
-	 * Return the error page content.
-	 *
-	 * @pre hasErrorPage()
-	 */
-	const string getErrorPage() const {
+	const string &getErrorPage() const {
 		return m_errorPage;
 	}
 	
-	/**
-	 * Whether the error page content is HTML.
-	 *
-	 * @pre hasErrorPage()
-	 */
 	bool isHTML() const {
 		return m_isHTML;
+	}
+	
+	ErrorKind getErrorKind() const {
+		return errorKind;
+	}
+	
+	SpawnException &setPreloaderCommand(const string &filename) {
+		preloaderCommand = filename;
+		return *this;
+	}
+	
+	const string &getPreloaderCommand() const {
+		return preloaderCommand;
+	}
+
+	void addAnnotations(const map<string, string> &annotations) {
+		map<string, string>::const_iterator it, end = annotations.end();
+		for (it = annotations.begin(); it != end; it++) {
+			this->annotations[it->first] = it->second;
+		}
+	}
+
+	const map<string, string> &getAnnotations() const {
+		return annotations;
+	}
+
+	string operator[](const string &name) const {
+		return get(name);
+	}
+
+	string get(const string &name) const {
+		map<string, string>::const_iterator it = annotations.find(name);
+		if (it == annotations.end()) {
+			return string();
+		} else {
+			return it->second;
+		}
+	}
+};
+
+/**
+ * Indicates that a Pool::get() or Pool::asyncGet() request was denied.
+ * The request never reached a process. This could be because, before the
+ * request could reach a process, the administrator detached the containing
+ * SuperGroup. Or maybe the request sat in the queue for too long.
+ */
+class GetAbortedException: public oxt::tracable_exception {
+private:
+	string msg;
+
+public:
+	GetAbortedException(const string &message)
+		: msg(message)
+		{ }
+	
+	virtual ~GetAbortedException() throw() {}
+	
+	virtual const char *what() const throw() {
+		return msg.c_str();
 	}
 };
 
