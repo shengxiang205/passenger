@@ -33,11 +33,15 @@
 
 #include <string>
 #include <set>
+// Checking for _PCREPOSIX_H avoids conflicts with headers provided by Apache.
+// https://code.google.com/p/phusion-passenger/issues/detail?id=651
 #ifndef _PCREPOSIX_H
-	#include <regex.h>
+	#include <boost/regex.h>
 #endif
 #include <cstdio>
 #include <cstring>
+#include <string.h>
+#include <stdlib.h>
 
 #include <StaticString.h>
 #include <Exceptions.h>
@@ -834,10 +838,10 @@ private:
 	struct MultiExpression;
 	struct Comparison;
 	struct FunctionCall;
-	typedef shared_ptr<BooleanComponent> BooleanComponentPtr;
-	typedef shared_ptr<MultiExpression> MultiExpressionPtr;
-	typedef shared_ptr<Comparison> ComparisonPtr;
-	typedef shared_ptr<FunctionCall> FunctionCallPtr;
+	typedef boost::shared_ptr<BooleanComponent> BooleanComponentPtr;
+	typedef boost::shared_ptr<MultiExpression> MultiExpressionPtr;
+	typedef boost::shared_ptr<Comparison> ComparisonPtr;
+	typedef boost::shared_ptr<FunctionCall> FunctionCallPtr;
 	
 	struct BooleanComponent {
 		virtual ~BooleanComponent() { }
@@ -916,6 +920,7 @@ private:
 		union {
 			struct {
 				char stringStorage[sizeof(string)];
+				string *stringPointer;
 				struct {
 					regex_t regexp;
 					int options;
@@ -941,7 +946,8 @@ private:
 			} else {
 				source = STRING_LITERAL;
 			}
-			new (u.stringOrRegexpValue.stringStorage) string(value.data(), value.size());
+			u.stringOrRegexpValue.stringPointer = new (u.stringOrRegexpValue.stringStorage)
+				string(value.data(), value.size());
 			if (regexp) {
 				int options = REG_EXTENDED;
 				u.stringOrRegexpValue.regexp.options = 0;
@@ -951,7 +957,7 @@ private:
 						Tokenizer::REGEXP_OPTION_CASE_INSENSITIVE;
 				}
 				regcomp(&u.stringOrRegexpValue.regexp.regexp,
-					value.toString().c_str(),
+					u.stringOrRegexpValue.stringPointer->c_str(),
 					options);
 			}
 		}
@@ -1062,7 +1068,7 @@ private:
 	
 	private:
 		const string &storedString() const {
-			return *((string *) u.stringOrRegexpValue.stringStorage);
+			return *u.stringOrRegexpValue.stringPointer;
 		}
 		
 		regex_t &storedRegexp() const {
@@ -1083,7 +1089,8 @@ private:
 			source = other.source;
 			switch (source) {
 			case REGEXP_LITERAL:
-				new (u.stringOrRegexpValue.stringStorage) string(other.storedString());
+				u.stringOrRegexpValue.stringPointer = new (u.stringOrRegexpValue.stringStorage)
+					string(other.storedString());
 				options = REG_EXTENDED;
 				if (other.u.stringOrRegexpValue.regexp.options & Tokenizer::REGEXP_OPTION_CASE_INSENSITIVE) {
 					options |= REG_ICASE;
@@ -1094,7 +1101,8 @@ private:
 				u.stringOrRegexpValue.regexp.options = other.u.stringOrRegexpValue.regexp.options;
 				break;
 			case STRING_LITERAL:
-				new (u.stringOrRegexpValue.stringStorage) string(other.storedString());
+				u.stringOrRegexpValue.stringPointer = new (u.stringOrRegexpValue.stringStorage)
+					string(other.storedString());
 				break;
 			case INTEGER_LITERAL:
 				u.intValue = other.u.intValue;
@@ -1380,7 +1388,7 @@ private:
 	
 	BooleanComponentPtr matchMultiExpression(int level) {
 		logMatch(level, "matchMultiExpression()");
-		MultiExpressionPtr result = make_shared<MultiExpression>();
+		MultiExpressionPtr result = boost::make_shared<MultiExpression>();
 		
 		result->firstExpression = matchExpression(level + 1);
 		while (isLogicalOperatorToken(peek())) {
@@ -1408,7 +1416,7 @@ private:
 			BooleanComponentPtr expression = matchMultiExpression(level + 1);
 			match(Tokenizer::RPARENTHESIS);
 			if (negate) {
-				return make_shared<Negation>(expression);
+				return boost::make_shared<Negation>(expression);
 			} else {
 				return expression;
 			}
@@ -1428,7 +1436,7 @@ private:
 			}
 			
 			if (negate) {
-				return make_shared<Negation>(component);
+				return boost::make_shared<Negation>(component);
 			} else {
 				return component;
 			}
@@ -1440,12 +1448,12 @@ private:
 	
 	BooleanComponentPtr matchSingleValueComponent(int level, const Token &token) {
 		logMatch(level, "matchSingleValueComponent()");
-		return make_shared<SingleValueComponent>(matchLiteral(level + 1, token));
+		return boost::make_shared<SingleValueComponent>(matchLiteral(level + 1, token));
 	}
 	
 	ComparisonPtr matchComparison(int level, const Token &subjectToken) {
 		logMatch(level, "matchComparison()");
-		ComparisonPtr comparison = make_shared<Comparison>();
+		ComparisonPtr comparison = boost::make_shared<Comparison>();
 		comparison->subject    = matchValue(level + 1, subjectToken);
 		comparison->comparator = matchComparator(level + 1);
 		comparison->object     = matchValue(level + 1, match());
@@ -1460,9 +1468,9 @@ private:
 		FunctionCallPtr function;
 		
 		if (id.rawValue == "starts_with") {
-			function = make_shared<StartsWithFunctionCall>();
+			function = boost::make_shared<StartsWithFunctionCall>();
 		} else if (id.rawValue == "has_hint") {
-			function = make_shared<HasHintFunctionCall>();
+			function = boost::make_shared<HasHintFunctionCall>();
 		} else {
 			raiseSyntaxError("unknown function '" + id.rawValue + "'", id);
 		}

@@ -1,5 +1,5 @@
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010 Phusion
+#  Copyright (c) 2010-2014 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -27,7 +27,9 @@ module Utils
 module AnsiColors
 	RESET    = "\e[0m".freeze
 	BOLD     = "\e[1m".freeze
+	DGRAY    = "\e[90m".freeze
 	RED      = "\e[31m".freeze
+	ORANGE   = "\e[38;5;214m".freeze
 	GREEN    = "\e[32m".freeze
 	YELLOW   = "\e[33m".freeze
 	WHITE    = "\e[37m".freeze
@@ -47,10 +49,23 @@ module AnsiColors
 	
 	def ansi_colorize(text)
 		text = text.gsub(%r{<b>(.*?)</b>}m, "#{BOLD}\\1#{DEFAULT_TERMINAL_COLOR}")
+		text.gsub!(%r{<dgray>(.*?)</dgray>}m, "#{BOLD}#{DGRAY}\\1#{DEFAULT_TERMINAL_COLOR}")
 		text.gsub!(%r{<red>(.*?)</red>}m, "#{BOLD}#{RED}\\1#{DEFAULT_TERMINAL_COLOR}")
+		text.gsub!(%r{<orange>(.*?)</orange>}m, "#{BOLD}#{ORANGE}\\1#{DEFAULT_TERMINAL_COLOR}")
 		text.gsub!(%r{<green>(.*?)</green>}m, "#{BOLD}#{GREEN}\\1#{DEFAULT_TERMINAL_COLOR}")
 		text.gsub!(%r{<yellow>(.*?)</yellow>}m, "#{BOLD}#{YELLOW}\\1#{DEFAULT_TERMINAL_COLOR}")
 		text.gsub!(%r{<banner>(.*?)</banner>}m, "#{BOLD}#{BLUE_BG}#{YELLOW}\\1#{DEFAULT_TERMINAL_COLOR}")
+		return text
+	end
+
+	def strip_color_tags(text)
+		text = text.gsub(%r{<b>(.*?)</b>}m, "\\1")
+		text = text.gsub(%r{<dgray>(.*?)</dgray>}m, "\\1")
+		text.gsub!(%r{<red>(.*?)</red>}m, "\\1")
+		text.gsub!(%r{<orange>(.*?)</orange>}m, "\\1")
+		text.gsub!(%r{<green>(.*?)</green>}m, "\\1")
+		text.gsub!(%r{<yellow>(.*?)</yellow>}m, "\\1")
+		text.gsub!(%r{<banner>(.*?)</banner>}m, "\\1")
 		return text
 	end
 end

@@ -22,7 +22,10 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  *  THE SOFTWARE.
  */
+
 #include <ApplicationPool2/AppTypes.h>
+#include <exception>
+#include <string.h>
 
 namespace Passenger {
 namespace ApplicationPool2 {
@@ -32,6 +35,8 @@ const AppTypeDefinition appTypeDefinitions[] = {
 	{ PAT_RACK, "rack", "config.ru", "Passenger RackApp" },
 	{ PAT_WSGI, "wsgi", "passenger_wsgi.py", "Passenger WsgiApp" },
 	{ PAT_CLASSIC_RAILS, "classic-rails", "config/environment.rb", "Passenger ClassicRailsApp" },
+	{ PAT_NODE, "node", "app.js", "Passenger NodeApp" },
+	{ PAT_METEOR, "meteor", ".meteor", "Passenger MeteorApp" },
 	{ PAT_NONE, NULL, NULL, NULL }
 };
 
@@ -42,33 +47,53 @@ const AppTypeDefinition appTypeDefinitions[] = {
 using namespace Passenger;
 using namespace Passenger::ApplicationPool2;
 
-PassengerAppTypeDetector *
-passenger_app_type_detector_new() {
-	return new AppTypeDetector();
+PP_AppTypeDetector *
+pp_app_type_detector_new() {
+	try {
+		return new AppTypeDetector();
+	} catch (const std::bad_alloc &) {
+		return 0;
+	}
 }
 
 void
-passenger_app_type_detector_free(PassengerAppTypeDetector *detector) {
+pp_app_type_detector_free(PP_AppTypeDetector *detector) {
 	delete (AppTypeDetector *) detector;
 }
 
 PassengerAppType
-passenger_app_type_detector_check_document_root(PassengerAppTypeDetector *_detector,
-	const char *documentRoot, unsigned int len, int resolveFirstSymlink)
+pp_app_type_detector_check_document_root(PP_AppTypeDetector *_detector,
+	const char *documentRoot, unsigned int len, int resolveFirstSymlink,
+	PP_Error *error)
 {
 	AppTypeDetector *detector = (AppTypeDetector *) _detector;
-	return detector->checkDocumentRoot(StaticString(documentRoot, len), resolveFirstSymlink);
+	try {
+		return detector->checkDocumentRoot(StaticString(documentRoot, len), resolveFirstSymlink);
+	} catch (const std::exception &e) {
+		pp_error_set(e, error);
+		return PAT_ERROR;
+	}
 }
 
 PassengerAppType
-passenger_app_type_detector_check_app_root(PassengerAppTypeDetector *_detector,
-	const char *appRoot, unsigned int len)
+pp_app_type_detector_check_app_root(PP_AppTypeDetector *_detector,
+	const char *appRoot, unsigned int len, PP_Error *error)
 {
 	AppTypeDetector *detector = (AppTypeDetector *) _detector;
-	return detector->checkAppRoot(StaticString(appRoot, len));
+	try {
+		return detector->checkAppRoot(StaticString(appRoot, len));
+	} catch (const std::exception &e) {
+		pp_error_set(e, error);
+		return PAT_ERROR;
+	}
 }
 
 const char *
-passenger_get_app_type_name(PassengerAppType type) {
+pp_get_app_type_name(PassengerAppType type) {
 	return getAppTypeName(type);
+}
+
+PassengerAppType
+pp_get_app_type2(const char *name, unsigned int len) {
+	return getAppType(StaticString(name, len));
 }

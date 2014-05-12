@@ -50,6 +50,63 @@ class Process;
 class Session;
 
 /**
+ * The result of a Group::spawn() call.
+ */
+enum SpawnResult {
+	// The spawn request has been honored. One or more processes are now being spawned.
+	SR_OK,
+
+	// A previous spawn request is still in progress, so this spawn request has been
+	// ignored. Having said that, the desired result (increasing the number of processes
+	// by one, within imposed constraints) will still be achieved.
+	SR_IN_PROGRESS,
+
+	// A non-rolling restart is currently in progress, so the spawn request cannot
+	// be honored.
+	SR_ERR_RESTARTING,
+
+	// Unable to spawn a new process: the upper bound of the group process limits have
+	// already been reached.
+	// The group limit is checked before checking whether the pool is at full capacity,
+	// so if you get this result then it is possible that the pool is also at full
+	// capacity at the same time.
+	SR_ERR_GROUP_UPPER_LIMITS_REACHED,
+
+	// Unable to spawn a new process: the pool is at full capacity. Pool capacity is
+	// checked after checking the group upper bound limits, so if you get this result
+	// then it is guaranteed that the group upper bound limits have not been reached.
+	SR_ERR_POOL_AT_FULL_CAPACITY
+};
+
+/**
+ * The result of a Group::attach() call.
+ */
+enum AttachResult {
+	// Attaching succeeded.
+	AR_OK,
+
+	// Attaching failed: the upper bound of the group process limits have
+	// already been reached.
+	// The group limit is checked before checking whether the pool is at full capacity,
+	// so if you get this result then it is possible that the pool is also at full
+	// capacity at the same time.
+	AR_GROUP_UPPER_LIMITS_REACHED,
+
+	// Attaching failed: the pool is at full capacity. Pool capacity is
+	// checked after checking the group upper bound limits, so if you get this result
+	// then it is guaranteed that the group upper bound limits have not been reached.
+	AR_POOL_AT_FULL_CAPACITY,
+
+	// Attaching failed: another group is waiting for capacity, while this group is
+	// not waiting for capacity. You should throw away the current process and let the
+	// other group spawn, e.g. by calling `pool->possiblySpawnMoreProcessesForExistingGroups()`.
+	// This is checked after checking for the group upper bound limits and the pool
+	// capacity, so if you get this result then there is guaranteed to be capacity
+	// in the current group and in the pool.
+	AR_ANOTHER_GROUP_IS_WAITING_FOR_CAPACITY
+};
+
+/**
  * The result of a Pool::disableProcess/Group::disable() call. Some values are only
  * returned by the functions, some values are only passed to the Group::disable()
  * callback, some values appear in all cases.
@@ -70,7 +127,7 @@ enum DisableResult {
 	DR_NOOP,
 	
 	// The disabling of the process failed: an error occurred.
-	// Only passed to the callback.
+	// Returned by functions and passed to the callback.
 	DR_ERROR,
 
 	// Indicates that the process cannot be disabled immediately
@@ -79,16 +136,31 @@ enum DisableResult {
 	DR_DEFERRED
 };
 
-typedef shared_ptr<Pool> PoolPtr;
-typedef shared_ptr<SuperGroup> SuperGroupPtr;
-typedef shared_ptr<Group> GroupPtr;
-typedef shared_ptr<Process> ProcessPtr;
-typedef shared_ptr<Session> SessionPtr;
-typedef shared_ptr<tracable_exception> ExceptionPtr;
+/**
+ * Determines the behavior of Pool::restartGroupsByName() and Group::restart().
+ * Specifically, determines whether to perform a rolling restart or not.
+ */
+enum RestartMethod {
+	// Whether a rolling restart is performed, is determined by whether rolling restart
+	// was enabled in the web server configuration (i.e. whether group->options.rollingRestart
+	// is already true).
+	RM_DEFAULT,
+	// Perform a blocking restart. group->options.rollingRestart will not be changed.
+	RM_BLOCKING,
+	// Perform a rolling restart. group->options.rollingRestart will not be changed.
+	RM_ROLLING
+};
+
+typedef boost::shared_ptr<Pool> PoolPtr;
+typedef boost::shared_ptr<SuperGroup> SuperGroupPtr;
+typedef boost::shared_ptr<Group> GroupPtr;
+typedef boost::shared_ptr<Process> ProcessPtr;
+typedef boost::shared_ptr<Session> SessionPtr;
+typedef boost::shared_ptr<tracable_exception> ExceptionPtr;
 typedef StringMap<SuperGroupPtr> SuperGroupMap;
-typedef function<void (const SessionPtr &session, const ExceptionPtr &e)> GetCallback;
-typedef function<void (const ProcessPtr &process, DisableResult result)> DisableCallback;
-typedef function<void ()> Callback;
+typedef boost::function<void (const SessionPtr &session, const ExceptionPtr &e)> GetCallback;
+typedef boost::function<void (const ProcessPtr &process, DisableResult result)> DisableCallback;
+typedef boost::function<void ()> Callback;
 
 struct GetWaiter {
 	Options options;
@@ -104,17 +176,13 @@ struct GetWaiter {
 
 struct Ticket {
 	boost::mutex syncher;
-	condition_variable cond;
+	boost::condition_variable cond;
 	SessionPtr session;
 	ExceptionPtr exception;
 };
 
 struct SpawnerConfig {
 	// Used by SmartSpawner and DirectSpawner.
-	/** Whether to print the preloader's and application's stdout. */
-	bool forwardStdout;
-	/** Whether to print the preloader's and application's stderr. */
-	bool forwardStderr;
 	/** A random generator to use. */
 	RandomGeneratorPtr randomGenerator;
 
@@ -124,21 +192,19 @@ struct SpawnerConfig {
 	unsigned int spawnTime;
 
 	SpawnerConfig(const RandomGeneratorPtr &randomGenerator = RandomGeneratorPtr())
-		: forwardStdout(true),
-		  forwardStderr(true),
-		  concurrency(1),
+		: concurrency(1),
 		  spawnerCreationSleepTime(0),
 		  spawnTime(0)
 	{
 		if (randomGenerator != NULL) {
 			this->randomGenerator = randomGenerator;
 		} else {
-			this->randomGenerator = make_shared<RandomGenerator>();
+			this->randomGenerator = boost::make_shared<RandomGenerator>();
 		}
 	}
 };
 
-typedef shared_ptr<SpawnerConfig> SpawnerConfigPtr;
+typedef boost::shared_ptr<SpawnerConfig> SpawnerConfigPtr;
 
 ExceptionPtr copyException(const tracable_exception &e);
 void rethrowException(const ExceptionPtr &e);

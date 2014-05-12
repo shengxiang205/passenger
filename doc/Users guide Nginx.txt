@@ -21,6 +21,7 @@ using the command line.
 
 include::users_guide_snippets/support_information.txt[]
 
+[[installation]]
 == Installation
 
 include::users_guide_snippets/installation.txt[]
@@ -66,7 +67,7 @@ Then restart Nginx. The application has now been deployed.
 [[deploying_rails_to_sub_uri]]
 === Deploying to a sub URI ===
 
-Suppose that you already have a 'server' virtual host entry:
+Suppose that you already have a virtual host for the application `/websites/phusion`:
 
 -------------------------------------------
 http {
@@ -76,23 +77,27 @@ http {
         listen 80;
         server_name www.phusion.nl;
         root /websites/phusion;
+        passenger_enabled on;
     }
 
     ...
 }
 -------------------------------------------
 
-And you want your Ruby on Rails application to be accessible from the URL
-'http://www.phusion.nl/rails'.
+And you want your Rails application, located in `/websites/rails`, to be accessible from the URL
+'http://www.phusion.nl/subapp'.
 
-To do this, make a symlink in the virtual host's document root, and have it
-point to your Ruby on Rails application's 'public' folder. For example:
--------------------------------------------
-ln -s /webapps/mycook/public /websites/phusion/rails
--------------------------------------------
+To do this, you need to perform the following:
 
-Next, set 'passenger_enabled on' and add a <<PassengerBaseURI,passenger_base_uri>>
-option to the 'server' block:
+ 1. Create a `location` with parameter `~ ^/<SUBURI>(/.*|$)`. This is a regular expression that says: "match everything that is exactly <SUBURI>, or starts with <SUBDURI>/".
+ 2. Inside the location block, set `alias <PATH TO YOUR APPLICATION'S PUBLIC DIRECTORY>$1`.
+ 3. Inside the location block, set `passenger_base_uri <SUBURI>`.
+ 4. Inside the location block, set `passenger_app_root <PATH TO YOUR APPLICATION ROOT>`.
+ 5. Inside the location block, set `passenger_document_root <PATH TO YOUR APPLICATION'S PUBLIC DIRECTORY>`.
+ 6. Inside the location block, re-specify `passenger_enabled on`.
+
+Here is an example:
+
 -------------------------------------------
 http {
     ...
@@ -101,28 +106,22 @@ http {
         listen 80;
         server_name www.phusion.nl;
         root /websites/phusion;
-        passenger_enabled on;        # <--- These lines have
-        passenger_base_uri /rails;   # <--- been added.
+
+        # This block has been added.
+        location ~ ^/subapp(/.*|$) {
+            alias /websites/rails/public$1;  # <-- be sure to point to 'public'!
+            passenger_base_uri /subapp;
+            passenger_app_root /websites/rails;
+            passenger_document_root /websites/rails/public;
+            passenger_enabled on;
+        }
     }
 
     ...
 }
 -------------------------------------------
-Then restart Nginx. The application has now been deployed.
 
-[TIP]
-======================================
-You can deploy multiple Rails applications under a virtual host, by specifying
-<<PassengerBaseURI,passenger_base_uri>> multiple times. For example:
----------------------------------
-server {
-    ...
-    passenger_base_uri /app1;
-    passenger_base_uri /app2;
-    passenger_base_uri /app3;
-}
----------------------------------
-======================================
+Then restart Nginx. The application has now been deployed on the sub-URI.
 
 === Redeploying (restarting the Ruby on Rails application) ===
 
@@ -261,7 +260,7 @@ Then restart Nginx. The application has now been deployed.
 [[deploying_rack_to_sub_uri]]
 === Deploying to a sub URI ===
 
-Suppose that you already have a virtual host:
+Suppose that you already have a virtual host for the application `/websites/phusion`:
 
 -------------------------------------------
 http {
@@ -278,17 +277,20 @@ http {
 }
 -------------------------------------------
 
-And you want your Rack application to be accessible from the URL
-'http://www.phusion.nl/rack'.
+And you want your Rack application, located in `/websites/rack`, to be accessible from the URL
+'http://www.phusion.nl/subapp'.
 
-To do this, make a symlink in the virtual host's document root, and have it
-point to your Rack application's 'public' folder. For example:
--------------------------------------------
-ln -s /webapps/rackapp/public /websites/phusion/rack
--------------------------------------------
+To do this, you need to perform the following:
 
-Next, set 'passenger_enabled on' and add a <<PassengerBaseURI,passenger_base_uri>>
-option to the 'server' block:
+ 1. Create a `location` with parameter `~ ^/<SUBURI>(/.*|$)`. This is a regular expression that says: "match everything that is exactly <SUBURI>, or starts with <SUBDURI>/".
+ 2. Inside the location block, set `alias <PATH TO YOUR APPLICATION'S PUBLIC DIRECTORY>$1`.
+ 3. Inside the location block, set `passenger_base_uri <SUBURI>`.
+ 4. Inside the location block, set `passenger_app_root <PATH TO YOUR APPLICATION ROOT>`.
+ 5. Inside the location block, set `passenger_document_root <PATH TO YOUR APPLICATION'S PUBLIC DIRECTORY>`.
+ 6. Inside the location block, re-specify `passenger_enabled on`.
+
+Here is an example:
+
 -------------------------------------------
 http {
     ...
@@ -297,28 +299,21 @@ http {
         listen 80;
         server_name www.phusion.nl;
         root /websites/phusion;
-        passenger_enabled on;        # <--- These lines have
-        passenger_base_uri /rack;    # <--- been added.
+
+        # This block has been added.
+        location ~ ^/subapp(/.*|$) {
+            alias /websites/rack/public$1;  # <-- be sure to point to 'public'!
+            passenger_base_uri /subapp;
+            passenger_app_root /websites/rack;
+            passenger_document_root /websites/rack/public;
+            passenger_enabled on;
+        }
     }
 
     ...
 }
 -------------------------------------------
-Then restart Nginx. The application has now been deployed.
-
-[TIP]
-======================================
-You can deploy multiple Rack applications under a virtual host, by specifying
-<<PassengerBaseURI,passenger_base_uri>> multiple times. For example:
----------------------------------
-server {
-    ...
-    passenger_base_uri /app1;
-    passenger_base_uri /app2;
-    passenger_base_uri /app3;
-}
----------------------------------
-======================================
+Then restart Nginx. The application has now been deployed on the sub-URI.
 
 === Redeploying (restarting the Rack application) ===
 
@@ -342,6 +337,7 @@ touch /webapps/rackapp/tmp/restart.txt
 include::users_guide_snippets/rackup_specifications.txt[]
 
 
+[[deploying_a_wsgi_app]]
 == Deploying a WSGI (Python) application
 
 Phusion Passenger supports all WSGI-compliant Python web applications. Suppose that you have a WSGI application in '/webapps/wsgiapp'. Then that folder must contain at least three entries:
@@ -380,7 +376,7 @@ $ some_awesome_editor passenger_wsgi.py
 $ cat passenger_wsgi.py
 def application(environ, start_response):
   start_response('200 OK', [('Content-Type', 'text/plain')])
-  return ["hello world!\n"]
+  return [b"hello world!\n"]
 -------------------------------------------
 
 Finally, we deploy it by adding the following configuration options to
@@ -423,6 +419,65 @@ http {
 -------------------------------------------
 Then restart Nginx. The application has now been deployed.
 
+[[deploying_wsgi_to_sub_uri]]
+=== Deploying to a sub URI ===
+
+Suppose that you already have a virtual host for the application `/websites/phusion`:
+
+-------------------------------------------
+http {
+    ...
+
+    server {
+        listen 80;
+        server_name www.phusion.nl;
+        root /websites/phusion;
+        passenger_enabled on;
+    }
+
+    ...
+}
+-------------------------------------------
+
+And you want your WSGI application, located in `/websites/wsgi`, to be accessible from the URL
+'http://www.phusion.nl/subapp'.
+
+To do this, you need to perform the following:
+
+ 1. Create a `location` with parameter `~ ^/<SUBURI>(/.*|$)`. This is a regular expression that says: "match everything that is exactly <SUBURI>, or starts with <SUBDURI>/".
+ 2. Inside the location block, set `alias <PATH TO YOUR APPLICATION'S PUBLIC DIRECTORY>$1`.
+ 3. Inside the location block, set `passenger_base_uri <SUBURI>`.
+ 4. Inside the location block, set `passenger_app_root <PATH TO YOUR APPLICATION ROOT>`.
+ 5. Inside the location block, set `passenger_document_root <PATH TO YOUR APPLICATION'S PUBLIC DIRECTORY>`.
+ 6. Inside the location block, re-specify `passenger_enabled on`.
+
+Here is an example:
+
+-------------------------------------------
+http {
+    ...
+
+    server {
+        listen 80;
+        server_name www.phusion.nl;
+        root /websites/phusion;
+
+        # This block has been added.
+        location ~ ^/subapp(/.*|$) {
+            alias /websites/wsgi/public$1;  # <-- be sure to point to 'public'!
+            passenger_base_uri /subapp;
+            passenger_app_root /websites/wsgi;
+            passenger_document_root /websites/wsgi/public;
+            passenger_enabled on;
+        }
+    }
+
+    ...
+}
+-------------------------------------------
+
+Then restart Nginx. The application has now been deployed on the sub-URI.
+
 === Redeploying (restarting the WSGI application) ===
 
 Deploying a new version of a WSGI application is as simple as
@@ -440,6 +495,16 @@ command line:
 -------------------------------------------
 touch /webapps/wsgiapp/tmp/restart.txt
 -------------------------------------------
+
+
+== Deploying a Node.js application
+
+Please refer to link:https://github.com/phusion/passenger/wiki/Phusion-Passenger%3A-Node.js-tutorial[the Node.js tutorial].
+
+
+== Deploying a Meteor application
+
+Please refer to link:https://github.com/phusion/passenger/wiki/Phusion-Passenger:-Meteor-tutorial[the Meteor tutorial].
 
 
 == Configuring Phusion Passenger ==
@@ -460,24 +525,158 @@ this option as well. Please read
 
 This required option may only occur once, in the 'http' configuration block.
 
-=== passenger_ruby <filename> ===
-This option allows one to specify the Ruby interpreter to use.
+NOTE: This option has no effect when you are using <<flying_passenger,Flying Passenger>>.
 
-Since version 4.0.0, this option may occur in the following places:
+=== Deployment options
+
+==== passenger_enabled <on|off>
+This option may be specified in the 'http' configuration block, a
+'server' configuration block, a 'location' configuration block or
+an 'if' configuration scope, to enable or disable Phusion Passenger
+for that server or that location.
+
+Phusion Passenger is disabled by default, so you must explicitly enable
+it for server blocks that you wish to serve through Phusion Passenger.
+Please see <<deploying_a_rack_app,Deploying a Rack-based Ruby application>>
+and <<deploying_a_wsgi_app,Deploying a WSGI (Python) application>>
+for examples.
+
+When using `location` blocks, you must re-specify `passenger_enabled` in each `location` block that you want to enable Phusion Passenger. This is because each `location` block has `passenger_enabled` turned off by default. For example:
+
+----------------------------
+server {
+    listen 80;
+    server_name www.foo.com;
+    root /webapps/foo/public;
+    passenger_enabled on;
+
+    location /attachments {
+        # Re-specify passenger_enabled here!
+        passenger_enabled on;
+    }
+}
+----------------------------
+
+[[PassengerRuby]]
+==== passenger_ruby <filename>
+The `passenger_ruby` option allows one to specify the Ruby interpreter to use. Similarly, the `passenger_python` and `passenger_nodejs` options are for specifying the Python interpreter and Node.js commands, respectively.
+
+In versions prior to 4.0.0, only a single Ruby version was supported for the entire Nginx instance, so `passenger_ruby` may only occur in the global server configuration. Also, the `passenger_python`/`passenger_nodejs` options were not supported.
+
+Since version 4.0.0, Phusion Passenger supports multiple Ruby interpreters in the same Nginx instance. And so, since version 4.0.0, this option may occur in the following places:
 
  * In the 'http' configuration block.
  * In a 'server' configuration block.
  * In a 'location' configuration block.
  * In an 'if' configuration scope.
 
-If you want to use a different Ruby interpreter for two different applications then you should define different `passenger_ruby` directives in different 'http' blocks.
+The `passenger_ruby` in the `http` block - that is, the one that `passenger-install-nginx-module` outputs - is used for invoking certain Phusion Passenger tools that are written in Ruby, e.g. the internal helper script used by <<PassengerPreStart,passenger_pre_start>>. It is okay if the value refers to a different Ruby interpreter than the one you originally installed Phusion Passenger with. You can learn more about all this in <<relationship_with_ruby,Phusion Passenger and its relationship with Ruby>>.
 
-In versions prior to 4.0.0, only a single Ruby version is supported for the entire Nginx instance, so `passenger_ruby` may only occur in the 'http' configuration block.
+The `passenger_ruby` directive in the `http` block is also used as the default Ruby interpreter for Ruby web apps. You don't *have* to specify a `passenger_ruby` in the `http` block though, because the default is to use the first `ruby` command found in `$PATH`.
 
-The default value is 'ruby', meaning that the Ruby interpreter will be looked up according to the `PATH` environment variable.
+The `passenger_python` and `passenger_nodejs` options work in a similar manner, but apply to Python and Node.js instead.
+
+You can also override `passenger_ruby` and other directives in specific contexts if you want to use a different interpreter for that web app. For example:
+
+------------------------------
+http {
+    passenger_root ...;
+    
+    # Use Ruby 1.8.7 by default.
+    passenger_ruby /usr/bin/ruby1.8;
+    # Use Python 2.6 by default.
+    passenger_python /usr/bin/python2.6;
+    # Use /usr/bin/node by default.
+    passenger_nodejs /usr/bin/node;
+
+    server {
+        # This Rails web app will use Ruby 1.8.7
+        listen 80;
+        server_name www.foo.com;
+        root /webapps/foo/public;
+    }
+
+    server {
+        # This Rails web app will use Ruby 1.9.3, as installed by RVM
+        passenger_ruby /usr/local/rvm/wrappers/ruby-1.9.3/ruby;
+
+        listen 80;
+        server_name www.bar.com;
+        root /webapps/bar/public;
+
+        # If you have a web app deployed in a sub-URI, customize
+        # passenger_ruby/passenger_python inside a `location` block.
+        # The web app under www.bar.com/blog will use JRuby 1.7.1
+        location ~ ^/blog(/.*|$) {
+            alias /websites/blog/public$1;
+            passenger_base_uri /blog;
+            passenger_app_root /websites/blog;
+            passenger_document_root /websites/blog/public;
+            passenger_enabled on;
+            passenger_ruby /usr/local/rvm/wrappers/jruby-1.7.1/ruby;
+        }
+    }
+
+    server {
+        # This Flask web app will use Python 3.0
+        passenger_python /usr/bin/python3.0;
+
+        listen 80;
+        server_name www.baz.com;
+        root /webapps/baz/public;
+    }
+}
+------------------------------
+
+include::users_guide_snippets/rvm_helper_tool.txt[]
+
+==== passenger_python <filename>
+:version: 4.0.0
+include::users_guide_snippets/since_version.txt[]
+
+This option allows one to specify the Python interpreter to use. See <<PassengerRuby,passenger_ruby>> for more information. The default value is 'python', meaning that the Python interpreter will be looked up according to the `PATH` environment variable.
+
+==== passenger_nodejs <filename>
+:version: 4.0.24
+include::users_guide_snippets/since_version.txt[]
+
+This option allows one to specify the Node.js command to use. See <<PassengerRuby,passenger_ruby>> for more information. The default value is 'node', meaning that the Node.js command will be looked up according to the `PATH` environment variable.
+
+[[PassengerAppEnv]]
+==== passenger_app_env <string>
+This option sets the value of the following environment variables:
+
+ * `RAILS_ENV`
+ * `RACK_ENV`
+ * `WSGI_ENV`
+ * `NODE_ENV`
+ * `PASSENGER_APP_ENV`
+
+Some web frameworks, for example Rails and Connect.js, adjust their behavior according to the value in one of these environment variables.
+
+Phusion Passenger for Nginx sets the default value to **production**. If you're developing an Rails application then you should set this to `development`.
+
+If you want to set other environment variables, please refer to <<env_vars_passenger_apps,Setting environment variables for Phusion Passenger-served apps>>.
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once. The default value is 'production'.
+
+[[RailsEnv]]
+==== rails_env <string>
+An alias for <<PassengerAppEnv,passenger_app_env>>.
+
+[[RackEnv]]
+==== rack_env <string>
+An alias for <<PassengerAppEnv,passenger_app_env>>.
 
 [[PassengerAppRoot]]
-=== passenger_app_root <path/to/root> ===
+==== passenger_app_root <path/to/root>
 :version: 4.0.0
 include::users_guide_snippets/since_version.txt[]
 By default, Phusion Passenger assumes that the application's root directory
@@ -507,8 +706,47 @@ server {
 }
 -----------------------------
 
+[[PassengerBaseURI]]
+==== passenger_base_uri <uri>
+Used to specify that the given URI is an distinct application that should
+be served by Phusion Passenger. Please refer to the following sections for
+more information:
+
+ * <<deploying_rack_to_sub_uri,Deploying Rack to a sub URI>>
+ * <<deploying_wsgi_to_sub_uri,Deploying WSGI to a sub URI>>
+ * <<deploying_rails_to_sub_uri,Deploying Rails 1 and Rails 2 to a sub URI>>
+
+It is allowed to specify this option multiple times. Do this to deploy multiple
+applications in different sub-URIs under the same virtual host.
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+[[PassengerDocumentRoot]]
+==== passenger_document_root <path>
+Used in sub-URI deployment scenarios to tell Phusion Passenger where it
+should look for static files. Please refer to the following sections for
+more information:
+
+ * <<deploying_rack_to_sub_uri,Deploying Rack to a sub URI>>
+ * <<deploying_wsgi_to_sub_uri,Deploying WSGI to a sub URI>>
+ * <<deploying_rails_to_sub_uri,Deploying Rails 1 and Rails 2 to a sub URI>>
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once.
+
 [[PassengerSpawnMethod]]
-=== passenger_spawn_method <string> ===
+==== passenger_spawn_method <string>
 [TIP]
 ."What spawn method should I use?"
 =========================================================
@@ -516,7 +754,7 @@ This subsection attempts to describe spawn methods, but it's okay if you don't (
 understand it, as it's mostly a technical detail. You can basically follow this rule of thumb:
 
 ************************************************
-If your application works on Mongrel, but not on Phusion Passenger, then set
+If your application works on Mongrel or Thin, but not on Phusion Passenger, then set
 `passenger_spawn_method` to 'direct'. Otherwise, leave it at 'smart' (the default).
 ************************************************
 
@@ -535,13 +773,31 @@ This option may occur in the following places:
 
 In each place, it may be specified at most once. The default value is 'smart'.
 
+[[PassengerLoadShellEnvvars]]
+==== passenger_load_shell_envvars <on|off>
+:version: 4.0.20
+include::users_guide_snippets/since_version.txt[]
+
+Enables or disables the loading of shell environment variables before spawning the application.
+
+If this option is turned on, and the user's shell is `bash`, then applications are loaded by running them with `bash -l -c`. Otherwise, they are loaded by running them directly from the `PassengerHelperAgent` process.
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once. The default value is 'on'.
+
 [[PassengerRollingRestarts]]
-=== passenger_rolling_restarts <on|off> ===
+==== passenger_rolling_restarts <on|off>
 :version: 3.0.0
 include::users_guide_snippets/enterprise_only.txt[]
 
-Enables or disables support for rolling restarts. Normally when you
-restart an application (by touching restart.txt), Phusion Passenger would
+Enables or disables support for rolling restarts through restart.txt. Normally when you
+restart an application by touching restart.txt, Phusion Passenger would
 shut down all application processes and spawn a new one. The spawning
 of a new application process could take a while, and any requests that
 come in during this time will be blocked until this first application
@@ -567,6 +823,13 @@ Rolling restarts have a few caveat however that you should be aware of:
   been restarted. It is for this reason that you should not use rolling
   restarts in development, only in production.
 
+If Passenger Enterprise could not rolling restart a process (let's call it 'A') because it is unable to spawn a new process (let's call it 'B'), then Passenger Enterprise will give up trying to rolling restart that particular process 'A'. What happens next depends on whether <<PassengerResistDeploymentErrors,deployment error resistance>> is enabled:
+
+- If deployment error resistance is disabled (the default), then Passenger Enterprise will proceed with trying to restart the remaining processes.
+- If deployment error resistance is enabled, the Passenger Enterprise will give up rolling restarting immediately. The application group will be put into Deployment Error Resistance Mode.
+
+Please note that `passenger_rolling_restarts` is completely unrelated to the `passenger-config restart-app` command. That command always initiates a blocking restart, unless `--rolling-restart` is given.
+
 This option may occur in the following places:
 
  * In the 'http' configuration block.
@@ -576,7 +839,8 @@ This option may occur in the following places:
 
 In each place, it may be specified at most once. The default value is 'off'.
 
-=== passenger_resist_deployment_errors <on|off> ===
+[[PassengerResistDeploymentErrors]]
+==== passenger_resist_deployment_errors <on|off>
 :version: 3.0.0
 include::users_guide_snippets/enterprise_only.txt[]
 
@@ -588,7 +852,7 @@ By enabling deployment error resistance, Phusion Passenger Enterprise would inst
 
 - It passes the request to one of the existing application processes (that belong to the previous version of the application). The visitor will not see a Phusion Passenger process spawning error message.
 - It logs the error to the global web server error log file.
-- It sets an internal flag so that no processes for this application will be spawned (even when the current traffic would normally result in more processes being spawned) and no processes will be idle cleaned. Processes *could* still be shutdown because of other events, e.g. because their <<PassengerMemoryLimit,memory limit>> have been reached.
+- It sets an internal flag so that no processes for this application will be spawned (even when the current traffic would normally result in more processes being spawned) and no processes will be idle cleaned. Processes *could* still be shutdown because of other events, e.g. because their <<PassengerMemoryLimit,memory limit>> have been reached. You can see whether the flag is set by invoking `passenger-status`. If you see the message "Resisting deployment error" then the flag is set.
 
 This way, visitors will suffer minimally from deployment errors. Phusion Passenger will attempt to restart the application again next time restart.txt is touched.
 
@@ -602,36 +866,6 @@ This option may occur in the following places:
  * In an 'if' configuration scope.
 
 In each place, it may be specified at most once. The default value is 'off'.
-
-=== Important deployment options ===
-==== passenger_enabled <on|off> ====
-This option may be specified in the 'http' configuration block, a
-'server' configuration block, a 'location' configuration block or
-an 'if' configuration scope, to enable or disable Phusion Passenger
-for that server or that location.
-
-Phusion Passenger is disabled by default, so you must explicitly enable
-it for server blocks that you wish to serve through Phusion Passenger.
-Please see <<deploying_a_ror_app,Deploying a Ruby on Rails application>>
-and <<deploying_a_rack_app,Deploying a Rack-based Ruby application>>
-for examples.
-
-[[PassengerBaseURI]]
-==== passenger_base_uri <uri> ====
-Used to specify that the given URI is an distinct application that should
-be served by Phusion Passenger. This option can be used for both Rails and
-Rack applications. See <<deploying_rails_to_sub_uri,Deploying Rails to a sub URI>>
-for an example.
-
-It is allowed to specify this option multiple times. Do this to deploy multiple
-applications in different sub-URIs under the same virtual host.
-
-This option may occur in the following places:
-
- * In the 'http' configuration block.
- * In a 'server' configuration block.
- * In a 'location' configuration block.
- * In an 'if' configuration scope.
 
 === Connection handling options ===
 
@@ -656,13 +890,19 @@ This option may occur in the following places:
 
 In each place, it may be specified at most once. The default value is 'off'.
 
+[[passenger_set_cgi_param]]
 ==== passenger_set_cgi_param <CGI environment name> <value> ====
-Allows one to define additional CGI environment variables to pass to the backend
-application. This is equivalent to ngx_http_fastcgi_module's 'fastcgi_param'
-directive, and is comparable to ngx_http_proxy_module's 'proxy_set_header' option.
+Allows one to define additional CGI environment variables to pass to the web
+application. This is comparable to ngx_http_fastcgi_module's 'fastcgi_param'
+directive, and to ngx_http_proxy_module's 'proxy_set_header' option.
 Nginx variables in the value are interpolated.
 
-For example:
+These variables passed in the following manner:
+
+ * On every request, in the form of a request variable.
+ * During application spawning, in the form of a system environment variable that can be looked up through `getenv()`.
+
+Example usage:
 ------------------------------
 # Application will see a CGI environment "APP_NAME" with value "my super blog".
 passenger_set_cgi_param APP_NAME "my super blog";
@@ -671,6 +911,9 @@ passenger_set_cgi_param APP_NAME "my super blog";
 passenger_set_cgi_param EXTRA_REQUEST_METHOD method=$request_method;
 ------------------------------
 
+.Use CGI environment names
+[NOTE]
+===============================================
 If you want to set an HTTP header, then you must set it in the CGI environment name
 format, i.e. 'HTTP_*':
 
@@ -681,10 +924,38 @@ passenger_set_cgi_param X-Forwarded-For 127.0.0.2;
 # Instead, write it like this:
 passenger_set_cgi_param HTTP_X_FORWARDED_FOR 127.0.0.2;
 ------------------------------
+===============================================
+
+.This configuration option is NOT inherited across contexts
+[WARNING]
+===============================================
+In each new context (e.g. in each new 'location' block), you must re-specify `passenger_set_cgi_param`. Values set in parent contexts have no effect on subcontexts. For example:
+
+------------------------------
+server {
+    ...
+    passenger_set_cgi_param FOO foo;
+
+    location /users {
+        passenger_enabled_on;
+        # !!!THIS IS WRONG!!! The 'FOO' CGI variable will not
+        # be passed URLs beginning with /users because you didn't
+        # re-specify passenger_set_cgi_param.
+    }
+
+    location /apps {
+        passenger_enabled on;
+        # This is correct. Here we re-specify passenger_set_cgi_param,
+        # so the 'FOO' CGI variable will be correctly passed to URLs
+        # starting with /apps.
+        passenger_set_cgi_param FOO foo;
+    }
+}
+------------------------------
+===============================================
 
 This option may occur in the following places:
 
- * In the 'http' configuration block.
  * In a 'server' configuration block.
  * In a 'location' configuration block.
  * In an 'if' configuration scope.
@@ -727,7 +998,7 @@ Nginx's response buffering works differently from Phusion Passenger's. Nginx's b
 
 How does response buffering - whether it's done by Nginx or by Phusion Passenger - exactly protect against slow clients?
 Consider an HTTP client that's on a dial-up modem link, and your
-application process generates a 2 MB response. If the response is buffered
+application process generates a 2 MB response. If the response is not buffered
 then your application process will be blocked until the entire 2 MB has been
 sent out to the HTTP client. This disallows your application process to do any useful
 work in the mean time. By buffering responses, Phusion Passenger or Nginx will read
@@ -786,6 +1057,67 @@ In each place, it may be specified at most once. The default value is 'off'.
 These options have the same effect as proxy_module's similarly named options.
 They can be used to modify the maximum allowed HTTP header size.
 
+[[passenger_intercept_errors]]
+==== passenger_intercept_errors <on|off> ====
+:version: 4.0.15
+include::users_guide_snippets/since_version.txt[]
+
+Decides if Nginx will intercept responses with HTTP status codes of 400 and higher.
+
+By default, all responses are sent as-is from the application or from the Phusion Passenger core. If you turn this option on then Nginx will be able to handle such responses using the Nginx `error_page` option. Responses with status codes that do not match an `error_page` option are sent as-is.
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once. The default value is 'off'.
+
+[[passenger_max_request_queue_size]]
+==== passenger_max_request_queue_size <number> ====
+:version: 4.0.15
+include::users_guide_snippets/since_version.txt[]
+
+When all application processes are already handling their maximum number of concurrent requests, Phusion Passenger will queue all incoming requests. This option specifies the maximum size for that queue. If the queue is already at this specified limit, then Phusion Passenger will immediately send a "503 Service Unavailable" error to any incoming requests. You may use <<passenger_request_queue_overflow_status_code,passenger_request_queue_overflow_status_code>> to customize the response status.
+
+A value of 0 means that the queue is unbounded.
+
+link:http://stackoverflow.com/questions/20402801/what-is-optimal-value-for-phusion-passenger-passengermaxrequestqueuesize[This article on StackOverflow] explains how the request queue works, what it means for the queue to grow or become full, why that is bad, and what you can do about it.
+
+You may combine this option with <<passenger_intercept_errors,passenger_intercept_errors>> and `error_page` to set a custom error page whenever the queue is full. In the following example, Nginx will serve /error503.html whenever the queue is full:
+
+---------------------------------
+passenger_intercept_errors on;
+error_page 503 /error503.html;
+---------------------------------
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once. The default value is '100'.
+
+[[passenger_request_queue_overflow_status_code]]
+==== passenger_request_queue_overflow_status_code <code> ====
+:version: 4.0.15
+include::users_guide_snippets/since_version.txt[]
+
+This option allows you to customize the HTTP status code that is sent back when the request queue is full. See <<passenger_max_request_queue_size,passenger_max_request_queue_size>> for more information.
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once. The default value is '503'.
+
 === Security options ===
 [[PassengerUserSwitching]]
 ==== passenger_user_switching <on|off> ====
@@ -794,6 +1126,9 @@ Whether to enable <<user_switching,user switching support>>.
 This option may only occur once, in the 'http' configuration block.
 The default value is 'on'.
 
+NOTE: This option has no effect when you are using <<flying_passenger,Flying Passenger>>. You can disable user switching for Flying Passenger by starting the Flying Passenger daemon as a non-root user.
+
+[[PassengerUser]]
 ==== passenger_user <username> ====
 If <<user_switching,user switching support>> is enabled, then Phusion Passenger will
 by default run the web application as the owner of the file 'config/environment.rb'
@@ -810,6 +1145,7 @@ This option may occur in the following places:
 
 In each place, it may be specified at most once.
 
+[[PassengerGroup]]
 ==== passenger_group <group name> ====
 If <<user_switching,user switching support>> is enabled, then Phusion Passenger will
 by default run the web application as the primary group of the owner of the file
@@ -838,6 +1174,8 @@ run as, if user switching fails or is disabled.
 This option may only occur once, in the 'http' configuration block.
 The default value is 'nobody'.
 
+NOTE: This option has no effect when you are using <<flying_passenger,Flying Passenger>>. There is currently no way to set this option when using Flying Passenger, but if you want to disable user switching for Flying Passenger then you can do so by starting the Flying Passenger daemon as a non-root user.
+
 [[PassengerDefaultGroup]]
 ==== Passenger_default_group <group name> ====
 Phusion Passenger enables <<user_switching,user switching support>> by default.
@@ -847,6 +1185,8 @@ run as, if user switching fails or is disabled.
 This option may only occur once, in the 'http' configuration block.
 The default value is the primary group of the user specifified by
 <<PassengerDefaultUser,passenger_default_user>>.
+
+NOTE: This option has no effect when you are using <<flying_passenger,Flying Passenger>>. There is currently no way to set this option when using Flying Passenger, but if you want to disable user switching for Flying Passenger then you can do so by starting the Flying Passenger daemon as a non-root user.
 
 ==== passenger_show_version_in_header <on|off> ====
 When turned on, Phusion Passenger will output its version number in the `Server` and `X-Powered-By` header in all Phusion Passenger-served requests:
@@ -872,14 +1212,17 @@ This option may occur in the following places:
 
 In each place, it may be specified at most once. The default value is 'on'.
 
+[[PassengerFriendlyErrorPages]]
 ==== passenger_friendly_error_pages <on|off> ====
 Phusion Passenger can display friendly error pages whenever an application fails
 to start. This friendly error page presents the startup error message, some
-suggestions for solving the problem, and a backtrace. This feature is very useful
-during application development and useful for less experienced system administrators,
-but the page might reveal potentially sensitive information, depending on the
-application. Experienced system administrators who are using Phusion Passenger
-on serious production servers should consider turning this feature off.
+suggestions for solving the problem, a backtrace and a dump of the environment variables.
+This feature is very useful during application development and useful for less experienced
+system administrators, but the page might reveal potentially sensitive information,
+depending on the application. For this reason, friendly error pages are turned off by default when
+<<PassengerAppEnv,passenger_app_env (and its aliases such as rails_env and rack_env)>>
+is set to 'staging' or 'production', but enabled by default otherwise. You can use
+this option to explicitly enable or disable this feature.
 
 This option may occur in the following places:
 
@@ -888,33 +1231,24 @@ This option may occur in the following places:
  * In a 'location' configuration block.
  * In an 'if' configuration scope.
 
-In each place, it may be specified at most once. The default value is 'on'.
+In each place, it may be specified at most once. The default value depends on <<PassengerAppEnv,passenger_app_env (and its aliases such as rails_env and rack_env)>>, as documented above.
 
 === Resource control and optimization options ===
 [[PassengerMaxPoolSize]]
 ==== passenger_max_pool_size <integer> ====
 The maximum number of <<application_process,application processes>> that may
 simultanously exist. A larger number results in higher memory usage,
-but improved ability to handle concurrent HTTP clients.
+but improves the ability to handle concurrent HTTP requests.
 
-The optimal value depends on your system's hardware and the server's average
-load. You should experiment with different values. But generally speaking,
-the value should be at least equal to the number of CPUs (or CPU cores) that
-you have. If your system has 2 GB of RAM, then we recommend a value of '15'.
-If your system is a Virtual Private Server (VPS) and has about 256 MB RAM, and
-is also running other services such as MySQL, then we recommend a value of '2'.
+The optimal value depends on your system's hardware and your workload. You can learn more at the Phusion article link:http://blog.phusion.nl/2013/03/12/tuning-phusion-passengers-concurrency-settings/[Tuning Phusion Passenger's concurrency settings].
 
-If you find that your server is unable to handle the load on your Rails/Rack websites
-(i.e. running out of memory) then you should lower this value. (Though if your
-sites are really that popular, then you should strongly consider upgrading your
-hardware or getting more servers.)
+If you find that your server is running out of memory then you should lower this value.
 
 This option may only occur once, in the 'http' configuration block.
 The default value is '6'.
 
-TIP: We strongly recommend you to <<reducing_memory_usage,use Ruby Enterprise
-Edition>>. This allows you to reduce the memory usage of your Ruby on Rails applications
-by about 33%, and it's not hard to install.
+:option: `--max-pool-size`
+include::users_guide_snippets/alternative_for_flying_passenger.txt[]
 
 [[PassengerMinInstances]]
 ==== passenger_min_instances <integer> ====
@@ -971,6 +1305,7 @@ The passenger_min_instances option may occur in the following places:
 
 In each place, it may be specified at most once. The default value is '1'.
 
+[[PassengerMaxInstances]]
 ==== passenger_max_instances <integer> ====
 :version: 3.0.0
 include::users_guide_snippets/enterprise_only.txt[]
@@ -1043,6 +1378,9 @@ applications, each which must be available at all times.
 This option may only occur once, in the 'http' configuration block.
 The default value is '300'.
 
+:option: `--pool-idle-time`
+include::users_guide_snippets/alternative_for_flying_passenger.txt[]
+
 ==== passenger_max_preloader_idle_time <integer> ====
 The ApplicationSpawner server (explained in <<spawning_methods_explained,Spawning
 methods explained>>) has an idle timeout, just like the backend processes spawned by
@@ -1069,6 +1407,24 @@ This option may occur in the following places:
 
 In each place, it may be specified at most once. The default value is '300' (5 minutes).
 
+:option: `--max-preloader-idle-time`
+include::users_guide_snippets/alternative_for_flying_passenger.txt[]
+
+==== passenger_start_timeout <seconds> ====
+:version: 4.0.15
+include::users_guide_snippets/since_version.txt[]
+
+Specifies a timeout for the startup of application processes. If an application process fails to start within the timeout period then it will be forcefully killed with SIGKILL, and the error will be logged.
+
+This option may occur in the following places:
+
+ * In the 'http' configuration block.
+ * In a 'server' configuration block.
+ * In a 'location' configuration block.
+ * In an 'if' configuration scope.
+
+In each place, it may be specified at most once. The default value is '90'.
+
 [[PassengerConcurrencyModel]]
 ==== passenger_concurrency_model <process|thread> ====
 :version: 4.0.0
@@ -1076,7 +1432,7 @@ include::users_guide_snippets/enterprise_only.txt[]
 
 Specifies the I/O concurrency model that should be used for application processes. Phusion Passenger supports two concurrency models:
 
- * 'process' - single-threaded, multi-processed I/O concurrency. Each application process only has a single thread and can only handle 1 request at a time. This is the concurrency model that Ruby applications traditionally used. It has excellent compatiblity (can work with applications that are not designed to be thread-safe) but is unsuitable workloads in which the application has to wait for a lot of external I/O (e.g. HTTP API calls), and uses more memory because each process has a large memory overhead.
+ * 'process' - single-threaded, multi-processed I/O concurrency. Each application process only has a single thread and can only handle 1 request at a time. This is the concurrency model that Ruby applications traditionally used. It has excellent compatiblity (can work with applications that are not designed to be thread-safe) but is unsuitable for workloads in which the application has to wait for a lot of external I/O (e.g. HTTP API calls), and uses more memory because each process has a large memory overhead.
  * 'thread' - multi-threaded, multi-processed I/O concurrency. Each application process has multiple threads (customizable via <<PassengerThreadCount,passenger_thread_count>>). This model provides much better I/O concurrency and uses less memory because threads share memory with each other within the same process. However, using this model may cause compatibility problems if the application is not designed to be thread-safe.
 
 This option may occur in the following places:
@@ -1256,6 +1612,8 @@ A few things to be careful of:
 This option may only occur in the 'http' configuration block. It may be specified
 any number of times.
 
+NOTE: This option is currently not available when using <<flying_passenger,Flying Passenger>>.
+
 ===== Example 1: basic usage =====
 
 Suppose that you have the following web applications.
@@ -1309,7 +1667,7 @@ server {
     listen 80;
     server_name myblog.com;
     root /webapps/wordpress;
-    rails_base_uri /store;
+    passenger_base_uri /store;
 }
 ---------------------------
 
@@ -1320,7 +1678,7 @@ server {
     listen 80;
     server_name myblog.com;
     root /webapps/wordpress;
-    rails_base_uri /store;
+    passenger_base_uri /store;
 }
 
 passenger_pre_start http://myblog.com/store;    # <----- added
@@ -1338,7 +1696,7 @@ passenger_pre_start http://myblog.com/;    # <----- WRONG! Missing "/store" part
 Application processes started with passenger_pre_start are
 also subject to the idle timeout rules as specified by
 <<PassengerPoolIdleTime,passenger_pool_idle_time>>! That means that by default,
-the pre-started application processes for foo.com are bar.com are shut down
+the pre-started application processes for foo.com and bar.com are shut down
 after a few minutes of inactivity. If you don't want that to happen, then
 you should combine passenger_pre_start with
 <<PassengerMinInstances,passenger_min_instances>>, like this:
@@ -1422,6 +1780,7 @@ Yes. And it does not perform any certificate validation.
 
 === Logging and debugging options ===
 
+[[PassengerLogLevel]]
 ==== passenger_log_level <integer> ====
 This option allows one to specify how much information Phusion Passenger should
 write to the Nginx error log file. A higher log level value means that more
@@ -1446,18 +1805,22 @@ error messages should be written to instead.
 
 This option may only occur once, in the 'http' configuration block.
 
+:option: `--log-file`
+include::users_guide_snippets/alternative_for_flying_passenger.txt[]
+
 ==== passenger_debugger <on|off> ====
 :version: 3.0.0
 include::users_guide_snippets/enterprise_only.txt[]
 
 Turns support for application debugging on or off. In case of Ruby applications,
-turning this option on will cause them to load the `ruby-debug` gem (when on Ruby 1.8)
-or the `debugger` gem (when on Ruby 1.9). If you're using Bundler, you should add
-this to your Gemfile:
+turning this option on will cause them to load the `ruby-debug` gem (when on Ruby 1.8),
+the `debugger` gem (when on Ruby 1.9) or the `byebug` gem (when on Ruby 2.0). If you're
+using Bundler, you should add this to your Gemfile:
 
 -------------------------------------------
 gem 'ruby-debug', :platforms => :ruby_18
 gem 'debugger', :platforms => :ruby_19
+gem 'byebug', :platforms => :ruby_20
 -------------------------------------------
 
 Once debugging is turned on, you can use the command `passenger-irb --debug <PID>` to attach an rdebug console to the application process with the given PID. Attaching will succeed once the application process executes a `debugger` command.
@@ -1472,33 +1835,47 @@ This option may occur in the following places:
 In each place, it may be specified at most once. The default value is 'off'.
 
 
-=== Ruby on Rails-specific options ===
-[[RailsEnv]]
-==== rails_env <string> ====
-This option allows one to specify the default `RAILS_ENV` value.
+=== Advanced options
 
-This option may occur in the following places:
+[[PassengerTempDir]]
+==== passenger_temp_dir <directory>
+Specifies the directory that Phusion Passenger should use for storing temporary
+files. This includes things such as Unix socket files.
 
- * In the 'http' configuration block.
- * In a 'server' configuration block.
- * In a 'location' configuration block.
- * In an 'if' configuration scope.
+This option may only be specified in the 'http' configuration block. The
+default temp directory that Phusion Passenger uses is '/tmp'.
 
-In each place, it may be specified at most once. The default value is 'production'.
+This option is especially useful if Nginx is not allowed to write to /tmp
+(which is the case on some systems with strict SELinux policies) or if the
+partition that /tmp lives on doesn't have enough disk space.
 
-=== Rack and Rails >= 3 specific options ===
-[[RackEnv]]
-==== rack_env <string> ====
-This option allows one to specify the default `RACK_ENV` value.
+.Command line tools
+Some Phusion Passenger command line administration tools, such as
+`passenger-status`, must know what Phusion Passenger's temp directory is
+in order to function properly. You can pass the directory through the
+`PASSENGER_TMPDIR` environment variable, or the `TMPDIR` environment variable
+(the former will be used if both are specified).
 
-This option may occur in the following places:
+For example, if you set 'passenger_temp_dir' to '/my_temp_dir', then invoke
+`passenger-status` after you've set the `PASSENGER_TMPDIR` or `TMPDIR`
+environment variable, like this:
 
- * In the 'http' configuration block.
- * In a 'server' configuration block.
- * In a 'location' configuration block.
- * In an 'if' configuration scope.
+----------------------------------------------------------
+export PASSENGER_TMPDIR=/my_temp-dir
+sudo -E passenger-status
+# The -E option tells 'sudo' to preserve environment variables.
+----------------------------------------------------------
 
-In each place, it may be specified at most once. The default value is 'production'.
+:option: `--temp-dir`
+include::users_guide_snippets/alternative_for_flying_passenger.txt[]
+
+==== passenger_fly_with <socket filename>
+:version: 4.1.0
+include::users_guide_snippets/enterprise_only.txt[]
+
+Enables <<flying_passenger,Flying Passenger>> mode, and configures Nginx to connect to the Flying Passenger daemon that's listening on the given socket filename.
+
+This option may only occur once, in the 'http' configuration block. When not set, Flying Passenger is not enabled.
 
 
 === Deprecated options ===
@@ -1508,6 +1885,20 @@ compatibility reasons.
 
 ==== rails_spawn_method ====
 Deprecated in favor of <<PassengerSpawnMethod,passenger_spawn_method>>.
+
+
+[[troubleshooting]]
+== Troubleshooting ==
+
+include::users_guide_snippets/troubleshooting/default.txt[]
+
+=== The application thinks its not on SSL even though it is
+
+Rails and many other frameworks infers whether it's running on SSL through the CGI
+environment variable `HTTPS`. This variable is *only* set if you set `ssl on`.
+Setting just `listen 443 ssl` is not enough.
+
+include::users_guide_snippets/troubleshooting/rails.txt[]
 
 
 == Analysis and system maintenance ==
@@ -1525,8 +1916,8 @@ Phusion Passenger hides a lot of complexity for the end user (i.e. the web serve
 system administrator), but sometimes it is desirable to know what is going on.
 This section describes a few things that Phusion Passenger does under the hood.
 
-=== Page caching support ===
 include::users_guide_snippets/under_the_hood/page_caching_support.txt[]
+include::users_guide_snippets/under_the_hood/relationship_with_ruby.txt[]
 
 [[application_detection]]
 === How Phusion Passenger detects whether a virtual host is a web application ===
@@ -1568,3 +1959,8 @@ include::users_guide_snippets/appendix_a_about.txt[]
 include::users_guide_snippets/appendix_b_terminology.txt[]
 
 include::users_guide_snippets/appendix_c_spawning_methods.txt[]
+
+[[about_environment_variables]]
+== Appendix D: About environment variables
+
+include::users_guide_snippets/environment_variables.txt[]

@@ -89,6 +89,7 @@
 #include <Utils/IOUtils.h>
 #include <Utils/StrIntUtils.h>
 #include <Utils/Base64.h>
+#include <Utils/ProcessMetricsCollector.h>
 
 namespace tut {
 	struct ApplicationPool2_DirectSpawnerTest;
@@ -117,8 +118,8 @@ protected:
 	class BackgroundIOCapturer {
 	private:
 		FileDescriptor fd;
-		string prefix;
-		bool print;
+		pid_t pid;
+		const char *channelName;
 		boost::mutex dataSyncher;
 		string data;
 		oxt::thread *thr;
@@ -143,20 +144,20 @@ protected:
 					}
 				} else {
 					{
-						lock_guard<boost::mutex> l(dataSyncher);
+						boost::lock_guard<boost::mutex> l(dataSyncher);
 						data.append(buf, ret);
 					}
 					UPDATE_TRACE_POINT();
-					if (print && ret == 1 && buf[0] == '\n') {
-						P_INFO(prefix);
-					} else if (print) {
+					if (ret == 1 && buf[0] == '\n') {
+						printAppOutput(pid, channelName, "", 0);
+					} else {
 						vector<StaticString> lines;
 						if (ret > 0 && buf[ret - 1] == '\n') {
 							ret--;
 						}
 						split(StaticString(buf, ret), '\n', lines);
 						foreach (const StaticString line, lines) {
-							P_INFO(prefix << line);
+							printAppOutput(pid, channelName, line.data(), line.size());
 						}
 					}
 				}
@@ -164,10 +165,10 @@ protected:
 		}
 		
 	public:
-		BackgroundIOCapturer(const FileDescriptor &_fd, const string &_prefix, bool _print)
+		BackgroundIOCapturer(const FileDescriptor &_fd, pid_t _pid, const char *_channelName)
 			: fd(_fd),
-			  prefix(_prefix),
-			  print(_print),
+			  pid(_pid),
+			  channelName(_channelName),
 			  thr(NULL)
 			{ }
 		
@@ -200,41 +201,46 @@ protected:
 			thr->interrupt_and_join();
 			delete thr;
 			thr = NULL;
-			lock_guard<boost::mutex> l(dataSyncher);
+			boost::lock_guard<boost::mutex> l(dataSyncher);
 			return data;
 		}
 
 		void appendToBuffer(const StaticString &dataToAdd) {
 			TRACE_POINT();
-			lock_guard<boost::mutex> l(dataSyncher);
+			boost::lock_guard<boost::mutex> l(dataSyncher);
 			data.append(dataToAdd.data(), dataToAdd.size());
 		}
 	};
 	
-	typedef shared_ptr<BackgroundIOCapturer> BackgroundIOCapturerPtr;
+	typedef boost::shared_ptr<BackgroundIOCapturer> BackgroundIOCapturerPtr;
 	
 	/**
 	 * A temporary directory for spawned child processes to write
 	 * debugging information to. It is removed after spawning has
 	 * determined to be successful or failed.
 	 */
-	struct DebugDir {
+	class DebugDir {
+	private:
 		string path;
 
-		DebugDir(uid_t uid, gid_t gid) {
-			path = "/tmp/passenger.spawn-debug.";
-			path.append(toString(getpid()));
-			path.append("-");
-			path.append(pointerToIntString(this));
+		static void doClosedir(DIR *dir) {
+			closedir(dir);
+		}
 
-			if (syscalls::mkdir(path.c_str(), 0700) == -1) {
+	public:
+		DebugDir(uid_t uid, gid_t gid) {
+			char buf[PATH_MAX] = "/tmp/passenger.spawn-debug.XXXXXXXXXX";
+			const char *result = mkdtemp(buf);
+			if (result == NULL) {
 				int e = errno;
-				throw FileSystemException("Cannot create directory '" +
-					path + "'", e, path);
+				throw SystemException("Cannot create a temporary directory "
+					"in the format of '/tmp/passenger-spawn-debug.XXX'", e);
+			} else {
+				path = result;
+				this_thread::disable_interruption di;
+				this_thread::disable_syscall_interruption dsi;
+				syscalls::chown(result, uid, gid);
 			}
-			this_thread::disable_interruption di;
-			this_thread::disable_syscall_interruption dsi;
-			syscalls::chown(path.c_str(), uid, gid);
 		}
 
 		~DebugDir() {
@@ -248,7 +254,7 @@ protected:
 		map<string, string> readAll() {
 			map<string, string> result;
 			DIR *dir = opendir(path.c_str());
-			ScopeGuard guard(boost::bind(closedir, dir));
+			ScopeGuard guard(boost::bind(doClosedir, dir));
 			struct dirent *ent;
 
 			while ((ent = readdir(dir)) != NULL) {
@@ -266,7 +272,7 @@ protected:
 		}
 	};
 
-	typedef shared_ptr<DebugDir> DebugDirPtr;
+	typedef boost::shared_ptr<DebugDir> DebugDirPtr;
 
 	/**
 	 * Contains information that will be used after fork()ing but before exec()ing,
@@ -312,6 +318,9 @@ protected:
 		gid_t gid;
 		int ngroups;
 		shared_array<gid_t> gidset;
+
+		// Other information
+		string codeRevision;
 	};
 
 	/**
@@ -338,8 +347,6 @@ protected:
 		FileDescriptor adminSocket;
 		FileDescriptor errorPipe;
 		const Options *options;
-		bool forwardStderr;
-		int forwardStderrTo;
 		DebugDirPtr debugDir;
 		
 		/****** Working state ******/
@@ -353,8 +360,6 @@ protected:
 			preparation = NULL;
 			pid = 0;
 			options = NULL;
-			forwardStderr = false;
-			forwardStderrTo = STDERR_FILENO;
 			spawnStartTime = 0;
 			timeout = 0;
 		}
@@ -391,7 +396,7 @@ private:
 
 			vector<string> args;
 			vector<string>::const_iterator it, end;
-			details.options->toVector(args, resourceLocator);
+			details.options->toVector(args, resourceLocator, Options::SPAWN_OPTIONS);
 			for (it = args.begin(); it != args.end(); it++) {
 				const string &key = *it;
 				it++;
@@ -420,7 +425,7 @@ private:
 
 	ProcessPtr handleSpawnResponse(NegotiationDetails &details) {
 		TRACE_POINT();
-		SocketListPtr sockets = make_shared<SocketList>();
+		SocketListPtr sockets = boost::make_shared<SocketList>();
 		while (true) {
 			string line;
 			
@@ -492,6 +497,22 @@ private:
 						SpawnException::APP_STARTUP_PROTOCOL_ERROR,
 						details);
 				}
+			} else if (key == "pid") {
+				// pid: <PID>
+				pid_t pid = atoi(value);
+				ProcessMetricsCollector collector;
+				vector<pid_t> pids;
+
+				pids.push_back(pid);
+				ProcessMetricMap result = collector.collect(pids);
+				if (result[pid].uid != details.preparation->uid) {
+					throwAppSpawnException("An error occurred while starting the "
+						"web application. The PID that the loader has returned does "
+						"not have the same UID as the loader itself.",
+						SpawnException::APP_STARTUP_PROTOCOL_ERROR,
+						details);
+				}
+				details.pid = pid;
 			} else {
 				throwAppSpawnException("An error occurred while starting the "
 					"web application. It sent an unknown startup response line "
@@ -508,11 +529,14 @@ private:
 				details);
 		}
 		
-		return make_shared<Process>(details.libev, details.pid,
+		ProcessPtr process = boost::make_shared<Process>(
+			details.libev, details.pid,
 			details.gupid, details.connectPassword,
 			details.adminSocket, details.errorPipe,
 			sockets, creationTime, details.spawnStartTime,
 			config);
+		process->codeRevision = details.preparation->codeRevision;
+		return process;
 	}
 	
 protected:
@@ -676,7 +700,8 @@ protected:
 		// remaining stderr output for at most 2 seconds.
 		if (errorKind != SpawnException::PRELOADER_STARTUP_TIMEOUT
 		 && errorKind != SpawnException::APP_STARTUP_TIMEOUT
-		 && details.stderrCapturer != NULL) {
+		 && details.stderrCapturer != NULL)
+		{
 			bool done = false;
 			unsigned long long timeout = 2000;
 			while (!done) {
@@ -703,7 +728,10 @@ protected:
 		
 		// Now throw SpawnException with the captured stderr output
 		// as error response.
-		SpawnException e(msg, stderrOutput, false, errorKind);
+		SpawnException e(msg,
+			createErrorPageFromStderrOutput(msg, errorKind, stderrOutput),
+			true,
+			errorKind);
 		annotateAppSpawnException(e, details);
 		throw e;
 	}
@@ -712,6 +740,37 @@ protected:
 		if (details.debugDir != NULL) {
 			e.addAnnotations(details.debugDir->readAll());
 		}
+	}
+
+	string createErrorPageFromStderrOutput(const string &msg,
+		SpawnException::ErrorKind errorKind,
+		const string &stderrOutput)
+	{
+		// These kinds of SpawnExceptions are not supposed to be handled through this function.
+		assert(errorKind != SpawnException::PRELOADER_STARTUP_EXPLAINABLE_ERROR);
+		assert(errorKind != SpawnException::APP_STARTUP_EXPLAINABLE_ERROR);
+
+		string result = escapeHTML(msg);
+
+		if (errorKind == SpawnException::PRELOADER_STARTUP_TIMEOUT
+		 || errorKind == SpawnException::APP_STARTUP_TIMEOUT
+		 || errorKind == SpawnException::PRELOADER_STARTUP_ERROR
+		 || errorKind == SpawnException::APP_STARTUP_ERROR)
+		{
+			result.append(" Please read <a href=\"https://github.com/phusion/passenger/wiki/Debugging-application-startup-problems\">this article</a> "
+				"for more information about this problem.");
+		}
+		result.append("<br>\n<h2>Raw process output:</h2>\n");
+
+		if (strip(stderrOutput).empty()) {
+			result.append("(empty)");
+		} else {
+			result.append("<pre>");
+			result.append(escapeHTML(stderrOutput));
+			result.append("</pre>");
+		}
+
+		return result;
 	}
 
 	template<typename Details>
@@ -735,18 +794,18 @@ protected:
 				if (details.stderrCapturer != NULL) {
 					details.stderrCapturer->appendToBuffer(result);
 				}
-				P_LOG(config->forwardStdout ? LVL_INFO : LVL_DEBUG,
-					"[App " << details.pid << " stdout] " << line);
+				printAppOutput(details.pid, "stdout", line.data(), line.size());
 			}
 		}
 	}
-	
+
 	SpawnPreparationInfo prepareSpawn(const Options &options) const {
 		TRACE_POINT();
 		SpawnPreparationInfo info;
 		prepareChroot(info, options);
 		prepareUserSwitching(info, options);
 		prepareSwitchingWorkingDirectory(info, options);
+		inferApplicationInfo(info);
 		return info;
 	}
 
@@ -782,17 +841,10 @@ protected:
 					getProcessUsername() + "; it looks like your system's " +
 					"user database is broken, please fix it.");
 			}
-			struct group *groupInfo = getgrgid(userInfo->pw_gid);
-			if (groupInfo == NULL) {
-				throw RuntimeException(string("Cannot get group database entry for ") +
-					"the default group belonging to username '" +
-					getProcessUsername() + "'; it looks like your system's " +
-					"user database is broken, please fix it.");
-			}
 			
 			info.switchUser = false;
 			info.username = userInfo->pw_name;
-			info.groupname = groupInfo->gr_name;
+			info.groupname = getGroupName(userInfo->pw_gid);
 			info.home = userInfo->pw_dir;
 			info.shell = userInfo->pw_shell;
 			info.uid = geteuid();
@@ -801,10 +853,11 @@ protected:
 			return;
 		}
 		
+		UPDATE_TRACE_POINT();
 		string defaultGroup;
 		string startupFile = absolutizePath(options.getStartupFile(), info.appRoot);
 		struct passwd *userInfo = NULL;
-		struct group *groupInfo = NULL;
+		gid_t  groupId = (gid_t) -1;
 		
 		if (options.defaultGroup.empty()) {
 			struct passwd *info = getpwnam(options.defaultUser.c_str());
@@ -823,6 +876,7 @@ protected:
 			defaultGroup = options.defaultGroup;
 		}
 		
+		UPDATE_TRACE_POINT();
 		if (!options.user.empty()) {
 			userInfo = getpwnam(options.user.c_str());
 		} else {
@@ -838,6 +892,7 @@ protected:
 			userInfo = getpwnam(options.defaultUser.c_str());
 		}
 		
+		UPDATE_TRACE_POINT();
 		if (!options.group.empty()) {
 			if (options.group == "!STARTUP_FILE!") {
 				struct stat buf;
@@ -846,24 +901,35 @@ protected:
 					throw SystemException("Cannot lstat(\"" +
 						startupFile + "\")", e);
 				}
-				groupInfo = getgrgid(buf.st_gid);
+				if (getgrgid(buf.st_gid) != NULL) {
+					groupId = buf.st_gid;
+				} else {
+					groupId = (gid_t) -1;
+				}
 			} else {
-				groupInfo = getgrnam(options.group.c_str());
+				struct group *groupInfo = getgrnam(options.group.c_str());
+				if (groupInfo != NULL) {
+					groupId = groupInfo->gr_gid;
+				} else {
+					groupId = (gid_t) -1;
+				}
 			}
 		} else if (userInfo != NULL) {
-			groupInfo = getgrgid(userInfo->pw_gid);
+			groupId = userInfo->pw_gid;
 		}
-		if (groupInfo == NULL || groupInfo->gr_gid == 0) {
-			groupInfo = getgrnam(defaultGroup.c_str());
+		if (groupId == 0 || groupId == (gid_t) -1) {
+			groupId = lookupGid(defaultGroup);
 		}
-		
+
+		UPDATE_TRACE_POINT();
 		if (userInfo == NULL) {
 			throw RuntimeException("Cannot determine a user to lower privilege to");
 		}
-		if (groupInfo == NULL) {
+		if (groupId == (gid_t) -1) {
 			throw RuntimeException("Cannot determine a group to lower privilege to");
 		}
 		
+		UPDATE_TRACE_POINT();
 		#ifdef __APPLE__
 			int groups[1024];
 			info.ngroups = sizeof(groups) / sizeof(int);
@@ -873,16 +939,16 @@ protected:
 		#endif
 		info.switchUser = true;
 		info.username = userInfo->pw_name;
-		info.groupname = groupInfo->gr_name;
+		info.groupname = getGroupName(groupId);
 		info.home = userInfo->pw_dir;
 		info.shell = userInfo->pw_shell;
 		info.uid = userInfo->pw_uid;
-		info.gid = groupInfo->gr_gid;
+		info.gid = groupId;
 		#if !defined(HAVE_GETGROUPLIST) && (defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__))
 			#define HAVE_GETGROUPLIST
 		#endif
 		#ifdef HAVE_GETGROUPLIST
-			int ret = getgrouplist(userInfo->pw_name, groupInfo->gr_gid,
+			int ret = getgrouplist(userInfo->pw_name, groupId,
 				groups, &info.ngroups);
 			if (ret == -1) {
 				int e = errno;
@@ -920,6 +986,58 @@ protected:
 
 		assert(info.appRootPathsInsideChroot.back() == info.appRootInsideChroot);
 	}
+
+	void inferApplicationInfo(SpawnPreparationInfo &info) const {
+		info.codeRevision = readFromRevisionFile(info);
+		if (info.codeRevision.empty()) {
+			info.codeRevision = inferCodeRevisionFromCapistranoSymlink(info);
+		}
+	}
+
+	string readFromRevisionFile(const SpawnPreparationInfo &info) const {
+		string filename = info.appRoot + "/REVISION";
+		try {
+			if (fileExists(filename)) {
+				return strip(readAll(filename));
+			}
+		} catch (const SystemException &e) {
+			P_WARN("Cannot access " << filename << ": " << e.what());
+		}
+		return string();
+	}
+
+	string inferCodeRevisionFromCapistranoSymlink(const SpawnPreparationInfo &info) const {
+		if (extractBaseName(info.appRoot) == "current") {
+			char buf[PATH_MAX + 1];
+			ssize_t ret;
+
+			do {
+				ret = readlink(info.appRoot.c_str(), buf, PATH_MAX);
+			} while (ret == -1 && errno == EINTR);
+			if (ret == -1) {
+				if (errno == EINVAL) {
+					return string();
+				} else {
+					int e = errno;
+					P_WARN("Cannot read symlink " << info.appRoot << ": " << strerror(e));
+				}
+			}
+
+			buf[ret] = '\0';
+			return extractBaseName(buf);
+		} else {
+			return string();
+		}
+	}
+
+	bool shouldLoadShellEnvvars(const Options &options, const SpawnPreparationInfo &preparation) const {
+		if (options.loadShellEnvvars) {
+			string shellName = extractBaseName(preparation.shell);
+			return shellName == "bash" || shellName == "zsh" || shellName == "ksh";
+		} else {
+			return false;
+		}
+	}
 	
 	string serializeEnvvarsFromPoolOptions(const Options &options) const {
 		vector< pair<StaticString, StaticString> >::const_iterator it, end;
@@ -927,10 +1045,12 @@ protected:
 		
 		appendNullTerminatedKeyValue(result, "IN_PASSENGER", "1");
 		appendNullTerminatedKeyValue(result, "PYTHONUNBUFFERED", "1");
+		appendNullTerminatedKeyValue(result, "NODE_PATH", resourceLocator.getNodeLibDir());
 		appendNullTerminatedKeyValue(result, "RAILS_ENV", options.environment);
 		appendNullTerminatedKeyValue(result, "RACK_ENV", options.environment);
 		appendNullTerminatedKeyValue(result, "WSGI_ENV", options.environment);
-		appendNullTerminatedKeyValue(result, "PASSENGER_ENV", options.environment);
+		appendNullTerminatedKeyValue(result, "NODE_ENV", options.environment);
+		appendNullTerminatedKeyValue(result, "PASSENGER_APP_ENV", options.environment);
 		if (!options.baseURI.empty() && options.baseURI != "/") {
 			appendNullTerminatedKeyValue(result,
 				"RAILS_RELATIVE_URL_ROOT",
@@ -1115,6 +1235,7 @@ protected:
 				details);
 		}
 		
+		protocol_begin:
 		if (result == "I have control 1.0\n") {
 			UPDATE_TRACE_POINT();
 			sendSpawnRequest(details);
@@ -1136,6 +1257,8 @@ protected:
 				return handleSpawnResponse(details);
 			} else if (result == "Error\n") {
 				handleSpawnErrorResponse(details);
+			} else if (result == "I have control 1.0\n") {
+				goto protocol_begin;
 			} else {
 				handleInvalidSpawnResponseType(result, details);
 			}
@@ -1211,11 +1334,19 @@ protected:
 	}
 	
 	void handleInvalidSpawnResponseType(const string &line, NegotiationDetails &details) {
-		throwAppSpawnException("An error occurred while starting "
-			"the web application. It sent an unknown response type \"" +
-			cEscapeString(line) + "\".",
-			SpawnException::APP_STARTUP_PROTOCOL_ERROR,
-			details);
+		if (line.empty()) {
+			throwAppSpawnException("An error occurred while starting "
+				"the web application. It exited before signalling successful "
+				"startup back to " PROGRAM_NAME ".",
+				SpawnException::APP_STARTUP_ERROR,
+				details);
+		} else {
+			throwAppSpawnException("An error occurred while starting "
+				"the web application. It sent an unknown response type \"" +
+				cEscapeString(line) + "\".",
+				SpawnException::APP_STARTUP_PROTOCOL_ERROR,
+				details);
+		}
 	}
 	
 public:
@@ -1248,7 +1379,7 @@ public:
 		return config;
 	}
 };
-typedef shared_ptr<Spawner> SpawnerPtr;
+typedef boost::shared_ptr<Spawner> SpawnerPtr;
 
 
 } // namespace ApplicationPool2

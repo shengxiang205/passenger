@@ -24,7 +24,7 @@ define 'ruby-dev' do
     end
   end
   
-  if ruby_command =~ %r(^/usr/bin/ruby)
+  if ruby_command =~ %r(^/usr/bin/ruby) || ruby_command =~ %r(^/System/Library/Frameworks/Ruby.framework)
     # Only tell user to install the headers with the system's package manager
     # if Ruby itself was installed with the package manager.
     on :debian do
@@ -35,6 +35,9 @@ define 'ruby-dev' do
     end
     on :redhat do
       yum_install "ruby-devel"
+    end
+    on :macosx do
+      install_osx_command_line_tools
     end
   end
   on :other_platforms do
@@ -109,8 +112,13 @@ define 'rake' do
   name "Rake (associated with #{ruby_command})"
   website "http://rake.rubyforge.org/"
   define_checker do
-    require 'phusion_passenger/platform_info/ruby'
-    check_for_command(PlatformInfo.rake_command)
+    PhusionPassenger.require_passenger_lib 'platform_info/ruby'
+    if result = PlatformInfo.rake_command
+      { :found => true,
+        "Location" => result }
+    else
+      false
+    end
   end
   
   if ruby_command =~ %r(^/usr/bin/ruby)
@@ -123,7 +131,7 @@ define 'rake' do
       urpmi "rake"
     end
     on :redhat do
-      yum_install "rake"
+      yum_install "rubygem-rake", :epel => true
     end
   end
   on :other_platforms do

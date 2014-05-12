@@ -111,7 +111,7 @@ using namespace oxt;
  * Except for otherwise documented parts, this class is not thread-safe,
  * so only access it within the ApplicationPool lock.
  */
-class SuperGroup: public enable_shared_from_this<SuperGroup> {
+class SuperGroup: public boost::enable_shared_from_this<SuperGroup> {
 public:
 	enum State {
 		/** This SuperGroup is being initialized. `groups` is empty and
@@ -168,7 +168,7 @@ public:
 		CANCELED
 	};
 
-	typedef function<void (ShutdownResult result)> ShutdownCallback;
+	typedef boost::function<void (ShutdownResult result)> ShutdownCallback;
 	
 private:
 	friend class Pool;
@@ -192,8 +192,11 @@ private:
 	static boost::mutex &getPoolSyncher(const PoolPtr &pool);
 	static void runAllActions(const vector<Callback> &actions);
 	string generateSecret() const;
+	void runInitializationHooks() const;
+	void runDestructionHooks() const;
+	void setupInitializationOrDestructionHook(HookScriptOptions &options) const;
 	
-	void createInterruptableThread(const function<void ()> &func, const string &name,
+	void createInterruptableThread(const boost::function<void ()> &func, const string &name,
 		unsigned int stackSize);
 	
 	void verifyInvariants() const {
@@ -251,7 +254,7 @@ private:
 		// This function is either called from the pool event loop or directly from
 		// the detachAllGroups post lock actions. In both cases getPool() is never NULL.
 		PoolPtr pool = self->getPool();
-		lock_guard<boost::mutex> lock(self->getPoolSyncher(pool));
+		boost::lock_guard<boost::mutex> lock(self->getPoolSyncher(pool));
 
 		vector<GroupPtr>::iterator it, end = self->detachedGroups.end();
 		for (it = self->detachedGroups.begin(); it != end; it++) {
@@ -273,8 +276,8 @@ private:
 			}
 			
 			while (!group->getWaitlist.empty()) {
-				getWaitlist.push(group->getWaitlist.front());
-				group->getWaitlist.pop();
+				getWaitlist.push_back(group->getWaitlist.front());
+				group->getWaitlist.pop_front();
 			}
 			detachedGroups.push_back(group);
 			group->shutdown(
@@ -294,12 +297,13 @@ private:
 			Group *group = route(waiter.options);
 			Options adjustedOptions = waiter.options;
 			adjustOptions(adjustedOptions, group);
-			SessionPtr session = group->get(adjustedOptions, waiter.callback);
+			SessionPtr session = group->get(adjustedOptions, waiter.callback,
+				postLockActions);
 			if (session != NULL) {
 				postLockActions.push_back(boost::bind(
 					waiter.callback, session, ExceptionPtr()));
 			}
-			getWaitlist.pop();
+			getWaitlist.pop_front();
 		}
 	}
 	
@@ -321,14 +325,12 @@ private:
 	void doDestroy(SuperGroupPtr self, unsigned int generation, ShutdownCallback callback) {
 		TRACE_POINT();
 		
-		// In the future we can run more destruction code here,
-		// without holding the lock. Note that any destruction
-		// code may not interfere with doInitialize().
+		runDestructionHooks();
 		
 		// Wait until 'detachedGroups' is empty.
 		UPDATE_TRACE_POINT();
 		PoolPtr pool = getPool();
-		unique_lock<boost::mutex> lock(getPoolSyncher(pool));
+		boost::unique_lock<boost::mutex> lock(getPoolSyncher(pool));
 		verifyInvariants();
 		while (true) {
 			if (OXT_UNLIKELY(this->generation != generation)) {
@@ -366,7 +368,7 @@ private:
 	
 public:
 	mutable boost::mutex backrefSyncher;
-	const weak_ptr<Pool> pool;
+	const boost::weak_ptr<Pool> pool;
 	
 	State state;
 	string name;
@@ -398,7 +400,7 @@ public:
 	 *    if !getWaitlist.empty():
 	 *       state == INITIALIZING
 	 */
-	std::queue<GetWaiter> getWaitlist;
+	deque<GetWaiter> getWaitlist;
 
 	/**
 	 * Groups which are being shut down right now. These Groups contain a
@@ -572,10 +574,12 @@ public:
 		return false;
 	}
 	
-	SessionPtr get(const Options &newOptions, const GetCallback &callback) {
+	SessionPtr get(const Options &newOptions, const GetCallback &callback,
+		vector<Callback> &postLockActions)
+	{
 		switch (state) {
 		case INITIALIZING:
-			getWaitlist.push(GetWaiter(newOptions, callback));
+			getWaitlist.push_back(GetWaiter(newOptions, callback));
 			verifyInvariants();
 			return SessionPtr();
 		case READY:
@@ -588,14 +592,14 @@ public:
 				Options adjustedOptions = newOptions;
 				adjustOptions(adjustedOptions, group);
 				verifyInvariants();
-				return group->get(adjustedOptions, callback);
+				return group->get(adjustedOptions, callback, postLockActions);
 			} else {
 				verifyInvariants();
-				return defaultGroup->get(newOptions, callback);
+				return defaultGroup->get(newOptions, callback, postLockActions);
 			}
 		case DESTROYING:
 		case DESTROYED:
-			getWaitlist.push(GetWaiter(newOptions, callback));
+			getWaitlist.push_back(GetWaiter(newOptions, callback));
 			setState(INITIALIZING);
 			createInterruptableThread(
 				boost::bind(
@@ -617,19 +621,29 @@ public:
 		return defaultGroup;
 	}
 	
-	unsigned int utilization() const {
+	unsigned int capacityUsed() const {
 		vector<GroupPtr>::const_iterator it, end = groups.end();
 		unsigned int result = 0;
 		
 		for (it = groups.begin(); it != end; it++) {
-			result += (*it)->utilization();
+			result += (*it)->capacityUsed();
 		}
 		if (state == INITIALIZING || state == RESTARTING) {
 			result++;
 		}
 		return result;
 	}
-	
+
+	unsigned int getProcessCount() const {
+		unsigned int result = 0;
+		vector<GroupPtr>::const_iterator g_it, g_end = groups.end();
+		for (g_it = groups.begin(); g_it != g_end; g_it++) {
+			const GroupPtr &group = *g_it;
+			result += group->getProcessCount();
+		}
+		return result;
+	}
+
 	bool needsRestart() const {
 		return false;
 	}
@@ -649,16 +663,6 @@ public:
 			state = RESTARTING;
 		}
 		verifyInvariants();
-	}
-
-	unsigned int getProcessCount() const {
-		unsigned int result = 0;
-		vector<GroupPtr>::const_iterator g_it, g_end = groups.end();
-		for (g_it = groups.begin(); g_it != g_end; g_it++) {
-			const GroupPtr &group = *g_it;
-			result += group->enabledCount + group->disablingCount + group->disabledCount;
-		}
-		return result;
 	}
 
 	string inspect() const {

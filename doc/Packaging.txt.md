@@ -1,33 +1,40 @@
 # Introduction
 
+This document describes how packagers can package Phusion Passenger binaries
+for their operating system.
+
 Phusion Passenger can be configured in 2 ways, the "originally packaged"
-configuration and the "natively packaged" configuration. Depending on the
-configuration, Phusion Passenger locates its files (also called _assets_)
-in a different manner.
+configuration where everything is in the same directory, and the
+"natively packaged" configuration where files are scattered across the
+filesystem, e.g. in a FHS-compliant configuration. This document describes
+how you can configure Phusion Passenger to locate its own files when they're
+scattered across the filesystem.
+
+Phusion Passenger files are also called _assets_ in this document.
 
 ## Originally packaged
 
 This is the configuration you get when you checkout Phusion Passenger from git,
-when you install Phusion Passenger from a gem or when you extract it from a tarball.
-All the original files are stored in a single directory tree, which we call the
-_source root_.
+when you install Phusion Passenger from a gem or when you extract it from a
+tarball. All the original files are stored in a single directory tree, which we
+call the _source root_.
 
-This configuration does not come with any binaries; they have to be compiled by the
-user. Binaries may either be located in the source root, or located in a different
-location. The following rules apply when it comes to looking for binaries and
-determining where to store compiled binaries:
+The git repository, gems and tarballs do not come with any binaries; they have
+to be compiled by the user. Phusion Passenger looks for binaries in, and (if
+the user initiates the compilation process) stores binaries in, the following
+directories:
 
- * It will normally look for binaries in a subdirectory under the source root, and
-   it will store compiled binaries in a subdirectory under the source root.
- * Phusion Passenger Standalone does things a little differently. It looks for
-   its binaries in one of these places, whichever first exists:
+ * Normally, binaries are to be located in the `agents` and `libout`
+   subdirectories under the source root.
+ * Phusion Passenger Standalone does things a little differently. Binaries are
+   to be located in one of the following directories, whichever it finds first:
 
     - `~/.passenger/standalone/<VERSION>/<TYPE-AND-ARCH>` (a)
     - `/var/lib/passenger-standalone/<VERSION-AND-ARCH>` (b)
 
-   If neither directories exist, then Passenger Standalone compiles the binaries and
-   stores them in (b) (when running as root) or in (a). It still looks for everything
-   else (like the .rb files) in the source root.
+   If neither directories exist, then Passenger Standalone compiles the
+   binaries and stores them in (b) (when running as root) or in (a). It still
+   looks for everything else (like the .rb files) in the source root.
 
 ## Natively packaged
 
@@ -36,8 +43,9 @@ package. This configuration comes not only with all necessary binaries, but also
 with some (but not all) source files. This is because when you run Phusion Passenger
 with a different Ruby interpreter than the packager intended, Phusion Passenger
 must be able to compile a new Ruby extension for that Ruby interpreter. This
-configuration does not however allow compiling against a different Apache or Nginx
-version than the packager intended.
+configuration does not however allow compiling against a different Apache version
+than the packager intended (but does allow compiling against a different Nginx
+version).
 
 In this configuration, files can be scattered anywhere throughout the filesystem. This
 way Phusion Passenger can be packaged in an FHS-compliant way. The exact locations
@@ -45,14 +53,8 @@ of the different types of files can be specified through a
 _location configuration file_. The existance and usage of a location configuration
 file does not automatically imply that Phusion Passenger is natively packaged.
 
-This configuration also does not allow running Phusion Passenger Standalone against
-a different Nginx version than the packager intended, but does allow running
-against a different Ruby version. Passenger Standlone looks for its binaries
-in the location as specified by the location configuration file; it makes no
-attempt to compile anything, except of course for the Ruby extension.
-
-If either the non-Standalone or the Standalone Passenger needs to have a new Ruby
-extension compiled, then it will store that in `~/.passenger/native_support/<VERSION>/<ARCH>`.
+If Phusion Passenger needs to have a new Ruby extension compiled, then it will
+store that in `~/.passenger/native_support/<VERSION>/<ARCH>`.
 
 
 # The location configuration file
@@ -83,14 +85,17 @@ The location configuration file is an ini file that looks as follows:
 
     [locations]
     natively_packaged=true
-    bin=/usr/bin
-    agents=/usr/lib/phusion-passenger
-    helper_scripts=/usr/share/phusion-passenger/helper-scripts
-    resources=/usr/share/phusion-passenger
-    doc=/usr/share/doc
-    rubylibdir=/usr/lib/ruby/1.9.0
-    apache2_module=/usr/lib/apache2/modules/mod_passenger.so
-    ruby_extension_source=/usr/share/phusion_passenger/ruby_native_support_source
+    bin_dir=/usr/bin
+    agents_dir=/usr/lib/phusion-passenger/agents
+    lib_dir=/usr/lib/phusion-passenger
+    helper_scripts_dir=/usr/share/phusion-passenger/helper-scripts
+    resources_dir=/usr/share/phusion-passenger
+    include_dir=/usr/share/phusion-passenger/include
+    doc_dir=/usr/share/doc/phusion-passenger
+    ruby_libdir=/usr/lib/ruby/vendor_ruby
+    apache2_module_path=/usr/lib/apache2/modules/mod_passenger.so
+    ruby_extension_source_dir=/usr/share/phusion-passenger/ruby_extension_source
+    nginx_module_source_dir=/usr/share/phusion-passenger/ngx_http_passenger_module
 
 All keys except fo `natively_packaged` specify the locations of assets and asset
 directories. The "Asset types" section provides a description of all asset types.
@@ -153,24 +158,24 @@ a list of all possible assets and asset directories.
    that contains the entire Phusion passenger source tree. Not available when
    natively packaged.
 
- * `bin`
+ * `bin_dir`
 
    A directory containing administration binaries and scripts and like
    `passenger-status`; tools that the user may directly invoke on the command line.
 
    Value when originally packaged: `<SOURCE_ROOT>/bin`
 
- * `agents`
+ * `agents_dir`
 
    A directory that contains (platform-dependent) binaries that Phusion Passenger
    uses, but that should not be directly invoked from the command line. Things like
    PassengerHelperAgent are located here.
 
    Value when originally packaged:
-   - Normally: `<SOURCE_ROOT>/agents`
+   - Normally: `<SOURCE_ROOT>/buildout/agents`
    - Passenger Standalone: `~/.passenger/standalone/<VERSION>/support-<ARCH>`
 
- * `helper_scripts`
+ * `helper_scripts_dir`
 
    A directory that contains non-binary scripts that Phusion Passenger uses, but
    that should not be directly invoked from the command line. Things like
@@ -178,7 +183,7 @@ a list of all possible assets and asset directories.
 
    Value when originally packaged: `<SOURCE_ROOT>/helper-scripts`
 
- * `resources`
+ * `resources_dir`
 
    A directory that contains non-executable, platform-independent resource files
    that the user should not directly access, like error page templates and
@@ -186,13 +191,27 @@ a list of all possible assets and asset directories.
 
    Value when originally packaged: `<SOURCE_ROOT>/resources`.
 
- * `doc`
+ * `doc_dir`
 
    A directory that contains documentation.
 
    Value when originally packaged: `<SOURCE_ROOT>/doc`.
 
- * `rubylibdir`
+ * `include_dir`
+
+   A directory that contains the Phusion Passenger header files that are
+   necessary for compiling Nginx.
+
+   Value when originally packaged: `<SOURCE_ROOT>/ext`
+
+ * `lib_dir`
+
+   A directory that contains the Phusion Passenger library files, e.g.
+   libboost_oxt.a and various .o files.
+
+   Value when originally packaged: `<SOURCE_ROOT>/buildout`
+
+ * `ruby_libdir`
 
    A directory that contains the Phusion Passenger Ruby library files. Note that
    the Phusion Passenger administration tools still locate phusion_passenger.rb
@@ -202,20 +221,30 @@ a list of all possible assets and asset directories.
 
    Value when originally packaged: `<SOURCE_ROOT>/lib`.
 
- * `apache2_module`
+ * `apache2_module_path`
 
    The filename of the Apache 2 module, or the filename that the Apache 2 module
    will be stored after it's compiled. Used by `passenger-install-module` to
    print an example configuration snippet.
 
-   Value when originally packaged: `<SOURCE_ROOT>/ext/apache2/mod_passenger.so`.
+   Value when originally packaged: `<SOURCE_ROOT>/buildout/apache2/mod_passenger.so`.
 
- * `ruby_extension_source`
+ * `ruby_extension_source_dir`
 
    The directory that contains the source code for the Phusion Passenger Ruby
-   extension.
+   extension. Phusion Passenger uses these sources to build a Ruby extension,
+   when it detects that the user is using a new Ruby interpeter for which
+   no Ruby extension has been compiled.
 
    Value when originally packaged: `<SOURCE_ROOT>/ext/ruby`.
+
+ * `nginx_module_source_dir`
+
+   The directory that contains the source code for the Phusion Passenger Nginx
+   module. passenger-install-nginx-module uses these sources to build Nginx
+   with Phusion Passenger support.
+
+   Value when originally packaged: `<SOURCE_ROOT>/ext/nginx`.
 
 
 # Vendoring of libraries
@@ -232,23 +261,20 @@ before compiling:
 Note that we require at least libev 4.11 and libeio 1.0.
 
 
-# Misc notes
+# Generating gem and tarball
 
-## Generating gem and tarball
-
-Use the following command to generate a gem and tarball, in which Phusion
+Use the following commands to generate a gem and tarball, in which Phusion
 Passenger is originally packaged and without any binaries:
 
-    rake package
+    rake package:gem
+    rake package:tarball
 
 The files will be stored in `pkg/`.
 
-## Fakeroot
+
+# Fakeroot
 
 You can generate a fakeroot with the command `rake fakeroot`. This will
 generate an FHS-compliant directory tree in `pkg/fakeroot`, which you can
 directly package or with minor modifications. The fakeroot even contains
 a location configuration file.
-
-If the default fakeroot structure is not sufficient, please consider
-sending a patch.

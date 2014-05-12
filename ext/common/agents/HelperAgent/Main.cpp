@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010-2013 Phusion
+ *  Copyright (c) 2010-2014 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -30,6 +30,7 @@
 #include <cstring>
 #include <cassert>
 #include <cerrno>
+#include <stdlib.h>
 #include <unistd.h>
 #include <limits.h>
 #include <pwd.h>
@@ -51,7 +52,6 @@
 
 #include <agents/HelperAgent/RequestHandler.h>
 #include <agents/HelperAgent/RequestHandler.cpp>
-#include <agents/HelperAgent/BacktracesServer.h>
 #include <agents/HelperAgent/AgentOptions.h>
 
 #include <agents/Base.h>
@@ -85,6 +85,7 @@ private:
 	
 	typedef MessageServer::CommonClientContext CommonClientContext;
 	
+	boost::shared_ptr<RequestHandler> requestHandler;
 	PoolPtr pool;
 	
 	
@@ -92,38 +93,44 @@ private:
 	 * Message handler methods
 	 *********************************************/
 	
-	void processDetach(CommonClientContext &commonContext, SpecificContext *specificContext, const vector<string> &args) {
+	void processDetachProcess(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
 		TRACE_POINT();
 		commonContext.requireRights(Account::DETACH);
-		/* if (pool->detach(args[1])) {
+		if (pool->detachProcess((pid_t) atoi(args[1]))) {
 			writeArrayMessage(commonContext.fd, "true", NULL);
-		} else { */
+		} else {
 			writeArrayMessage(commonContext.fd, "false", NULL);
-		//}
+		}
+	}
+
+	void processDetachProcessByKey(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
+		TRACE_POINT();
+		commonContext.requireRights(Account::DETACH);
+		// TODO: implement this
+		writeArrayMessage(commonContext.fd, "false", NULL);
 	}
 	
-	bool processInspect(CommonClientContext &commonContext, SpecificContext *specificContext, const vector<string> &args) {
+	bool processInspect(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
 		TRACE_POINT();
 		commonContext.requireRights(Account::INSPECT_BASIC_INFO);
 		if ((args.size() - 1) % 2 != 0) {
 			return false;
 		}
 
-		VariantMap map;
-		vector<string>::const_iterator it = args.begin(), end = args.end();
-		it++;
-		while (it != end) {
-			const string &key = *it;
-			it++;
-			const string &value = *it;
-			map.set(key, value);
-			it++;
-		}
-		writeScalarMessage(commonContext.fd, pool->inspect(Pool::InspectOptions(map)));
+		VariantMap options = argsToOptions(args);
+		writeScalarMessage(commonContext.fd, pool->inspect(Pool::InspectOptions(options)));
 		return true;
 	}
 	
-	void processToXml(CommonClientContext &commonContext, SpecificContext *specificContext, const vector<string> &args) {
+	void processToXml(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
 		TRACE_POINT();
 		commonContext.requireRights(Account::INSPECT_BASIC_INFO);
 		bool includeSensitiveInfo =
@@ -131,14 +138,49 @@ private:
 			args[1] == "true";
 		writeScalarMessage(commonContext.fd, pool->toXml(includeSensitiveInfo));
 	}
+
+	void processBacktraces(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
+		TRACE_POINT();
+		commonContext.requireRights(Account::INSPECT_BACKTRACES);
+		writeScalarMessage(commonContext.fd, oxt::thread::all_backtraces());
+	}
+
+	void processRestartAppGroup(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
+		TRACE_POINT();
+		commonContext.requireRights(Account::RESTART);
+		VariantMap options = argsToOptions(args, 2);
+		RestartMethod method = RM_DEFAULT;
+		if (options.get("method", false) == "blocking") {
+			method = RM_BLOCKING;
+		} else if (options.get("method", false) == "rolling") {
+			method = RM_ROLLING;
+		}
+		bool result = pool->restartGroupByName(args[1], method);
+		writeArrayMessage(commonContext.fd, result ? "true" : "false", NULL);
+	}
+
+	void processRequests(CommonClientContext &commonContext, SpecificContext *specificContext,
+		const vector<string> &args)
+	{
+		TRACE_POINT();
+		stringstream stream;
+		commonContext.requireRights(Account::INSPECT_REQUESTS);
+		requestHandler->inspect(stream);
+		writeScalarMessage(commonContext.fd, stream.str());
+	}
 	
 public:
-	RemoteController(const PoolPtr &pool) {
+	RemoteController(const boost::shared_ptr<RequestHandler> &requestHandler, const PoolPtr &pool) {
+		this->requestHandler = requestHandler;
 		this->pool = pool;
 	}
 	
 	virtual MessageServer::ClientContextPtr newClient(CommonClientContext &commonContext) {
-		return make_shared<SpecificContext>();
+		return boost::make_shared<SpecificContext>();
 	}
 	
 	virtual bool processMessage(CommonClientContext &commonContext,
@@ -147,12 +189,20 @@ public:
 	{
 		SpecificContext *specificContext = (SpecificContext *) _specificContext.get();
 		try {
-			if (args[0] == "detach" && args.size() == 2) {
-				processDetach(commonContext, specificContext, args);
+			if (isCommand(args, "detach_process", 1)) {
+				processDetachProcess(commonContext, specificContext, args);
+			} else if (isCommand(args, "detach_process_by_key", 1)) {
+				processDetachProcessByKey(commonContext, specificContext, args);
 			} else if (args[0] == "inspect") {
 				return processInspect(commonContext, specificContext, args);
-			} else if (args[0] == "toXml" && args.size() == 2) {
+			} else if (isCommand(args, "toXml", 1)) {
 				processToXml(commonContext, specificContext, args);
+			} else if (isCommand(args, "backtraces", 0)) {
+				processBacktraces(commonContext, specificContext, args);
+			} else if (isCommand(args, "restart_app_group", 1, 99)) {
+				processRestartAppGroup(commonContext, specificContext, args);
+			} else if (isCommand(args, "requests", 0)) {
+				processRequests(commonContext, specificContext, args);
 			} else {
 				return false;
 			}
@@ -219,10 +269,10 @@ private:
 	AccountsDatabasePtr accountsDatabase;
 	MessageServerPtr messageServer;
 	ResourceLocator resourceLocator;
-	shared_ptr<RequestHandler> requestHandler;
-	shared_ptr<oxt::thread> prestarterThread;
-	shared_ptr<oxt::thread> messageServerThread;
-	shared_ptr<oxt::thread> eventLoopThread;
+	boost::shared_ptr<RequestHandler> requestHandler;
+	boost::shared_ptr<oxt::thread> prestarterThread;
+	boost::shared_ptr<oxt::thread> messageServerThread;
+	boost::shared_ptr<oxt::thread> eventLoopThread;
 	EventFd exitEvent;
 	
 	/**
@@ -235,7 +285,7 @@ private:
 		this_thread::disable_syscall_interruption dsi;
 		requestSocket = createUnixServer(getRequestSocketFilename().c_str());
 		
-		int ret;
+		int ret, e;
 		do {
 			ret = chmod(getRequestSocketFilename().c_str(), S_ISVTX |
 				S_IRUSR | S_IWUSR | S_IXUSR |
@@ -244,6 +294,44 @@ private:
 		} while (ret == -1 && errno == EINTR);
 
 		setNonBlocking(requestSocket);
+
+		if (!options.requestSocketLink.empty()) {
+			struct stat buf;
+
+			// If this is a symlink then we'll want to check the file the symlink
+			// points to, so we use stat() instead of lstat().
+			ret = syscalls::stat(options.requestSocketLink.c_str(), &buf);
+			if (ret == 0 || (ret == -1 && errno == ENOENT)) {
+				if (ret == -1 || buf.st_mode & S_IFSOCK) {
+					if (syscalls::unlink(options.requestSocketLink.c_str()) == -1) {
+						e = errno;
+						throw FileSystemException("Cannot delete existing socket file '" +
+							options.requestSocketLink + "'", e, options.requestSocketLink);
+					}
+				} else {
+					throw RuntimeException("File '" + options.requestSocketLink +
+						"' already exists and is not a Unix domain socket");
+				}
+			} else if (ret == -1 && errno != ENOENT) {
+				e = errno;
+				throw FileSystemException("Cannot stat() file '" + options.requestSocketLink + "'",
+					e,
+					options.requestSocketLink);
+			}
+
+			do {
+				ret = symlink(getRequestSocketFilename().c_str(),
+					options.requestSocketLink.c_str());
+			} while (ret == -1 && errno == EINTR);
+			if (ret == -1) {
+				e = errno;
+				throw FileSystemException("Cannot create a symlink '" +
+					options.requestSocketLink +
+					"' to '" + getRequestSocketFilename() + "'",
+					e,
+					options.requestSocketLink);
+			}
+		}
 	}
 	
 	/**
@@ -251,8 +339,8 @@ private:
 	 */
 	void lowerPrivilege(const string &username, const string &groupname) {
 		struct passwd *userEntry;
-		struct group  *groupEntry;
-		int            e;
+		gid_t gid;
+		int e;
 		
 		userEntry = getpwnam(username.c_str());
 		if (userEntry == NULL) {
@@ -260,8 +348,8 @@ private:
 				"HelperAgent's privilege to that of user '") + username +
 				"': user does not exist.");
 		}
-		groupEntry = getgrnam(groupname.c_str());
-		if (groupEntry == NULL) {
+		gid = lookupGid(groupname);
+		if (gid == (gid_t) -1) {
 			throw NonExistentGroupException(string("Unable to lower Passenger "
 				"HelperAgent's privilege to that of user '") + username +
 				"': user does not exist.");
@@ -273,7 +361,7 @@ private:
 				"privilege to that of user '") + username +
 				"': cannot set supplementary groups for this user", e);
 		}
-		if (setgid(groupEntry->gr_gid) != 0) {
+		if (setgid(gid) != 0) {
 			e = errno;
 			throw SystemException(string("Unable to lower Passenger HelperAgent's "
 				"privilege to that of user '") + username +
@@ -285,16 +373,10 @@ private:
 				"privilege to that of user '") + username +
 				"': cannot set user ID", e);
 		}
-	}
-	
-	void resetWorkerThreadInactivityTimers() {
-		requestHandler->resetInactivityTimer();
-	}
-	
-	unsigned long long minWorkerThreadInactivityTime() const {
-		return requestHandler->inactivityTime();
-	}
 
+		setenv("HOME", userEntry->pw_dir, 1);
+	}
+	
 	void onSigquit(ev::sig &signal, int revents) {
 		requestHandler->inspect(cerr);
 		cerr.flush();
@@ -342,7 +424,7 @@ public:
 	Server(FileDescriptor feedbackFd, const AgentOptions &_options)
 		: options(_options),
 		  requestLoop(true),
-		  serverInstanceDir(options.webServerPid, options.tempDir, false),
+		  serverInstanceDir(_options.serverInstanceDir, false),
 		  resourceLocator(options.passengerRoot)
 	{
 		TRACE_POINT();
@@ -351,10 +433,14 @@ public:
 		UPDATE_TRACE_POINT();
 		generation = serverInstanceDir.getGeneration(options.generationNumber);
 		startListening();
-		accountsDatabase = AccountsDatabase::createDefault(generation,
-			options.userSwitching, options.defaultUser, options.defaultGroup);
-		accountsDatabase->add("_web_server", options.messageSocketPassword, false, Account::EXIT);
-		messageServer = ptr(new MessageServer(generation->getPath() + "/socket", accountsDatabase));
+		accountsDatabase = boost::make_shared<AccountsDatabase>();
+		accountsDatabase->add("_passenger-status", options.adminToolStatusPassword, false,
+			Account::INSPECT_BASIC_INFO | Account::INSPECT_SENSITIVE_INFO |
+			Account::INSPECT_BACKTRACES | Account::INSPECT_REQUESTS |
+			Account::DETACH | Account::RESTART);
+		accountsDatabase->add("_web_server", options.exitPassword, false, Account::EXIT);
+		messageServer = boost::make_shared<MessageServer>(
+			parseUnixSocketAddress(options.adminSocketAddress), accountsDatabase);
 		
 		createFile(generation->getPath() + "/helper_agent.pid",
 			toString(getpid()), S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -362,26 +448,32 @@ public:
 		if (geteuid() == 0 && !options.userSwitching) {
 			lowerPrivilege(options.defaultUser, options.defaultGroup);
 		}
+
+		UPDATE_TRACE_POINT();
+		randomGenerator = boost::make_shared<RandomGenerator>();
+		// Check whether /dev/urandom is actually random.
+		// https://code.google.com/p/phusion-passenger/issues/detail?id=516
+		if (randomGenerator->generateByteString(16) == randomGenerator->generateByteString(16)) {
+			throw RuntimeException("Your random number device, /dev/urandom, appears to be broken. "
+				"It doesn't seem to be returning random data. Please fix this.");
+		}
 		
 		UPDATE_TRACE_POINT();
-		loggerFactory = make_shared<UnionStation::LoggerFactory>(options.loggingAgentAddress,
+		loggerFactory = boost::make_shared<UnionStation::LoggerFactory>(options.loggingAgentAddress,
 			"logging", options.loggingAgentPassword);
-		randomGenerator = make_shared<RandomGenerator>();
-		spawnerFactory = make_shared<SpawnerFactory>(poolLoop.safe,
-			resourceLocator, generation, make_shared<SpawnerConfig>(randomGenerator));
-		pool = make_shared<Pool>(poolLoop.safe.get(), spawnerFactory, loggerFactory,
-			randomGenerator);
+		spawnerFactory = boost::make_shared<SpawnerFactory>(poolLoop.safe,
+			resourceLocator, generation, boost::make_shared<SpawnerConfig>(randomGenerator));
+		pool = boost::make_shared<Pool>(spawnerFactory, loggerFactory,
+			randomGenerator, &options);
 		pool->initialize();
 		pool->setMax(options.maxPoolSize);
-		//pool->setMaxPerApp(maxInstancesPerApp);
 		pool->setMaxIdleTime(options.poolIdleTime * 1000000);
 		
-		messageServer->addHandler(make_shared<RemoteController>(pool));
-		messageServer->addHandler(make_shared<BacktracesServer>());
-		messageServer->addHandler(ptr(new ExitHandler(exitEvent)));
-
-		requestHandler = make_shared<RequestHandler>(requestLoop.safe,
+		requestHandler = boost::make_shared<RequestHandler>(requestLoop.safe,
 			requestSocket, pool, options);
+
+		messageServer->addHandler(boost::make_shared<RemoteController>(requestHandler, pool));
+		messageServer->addHandler(ptr(new ExitHandler(exitEvent)));
 
 		sigquitWatcher.set(requestLoop.loop);
 		sigquitWatcher.set(SIGQUIT);
@@ -395,8 +487,9 @@ public:
 			messageServer->getSocketFilename().c_str(),
 			NULL);
 		
-		function<void ()> func = boost::bind(prestartWebApps,
+		boost::function<void ()> func = boost::bind(prestartWebApps,
 			resourceLocator,
+			options.defaultRubyCommand,
 			options.prestartUrls
 		);
 		prestarterThread = ptr(new oxt::thread(
@@ -416,18 +509,41 @@ public:
 		}
 		
 		messageServer.reset();
+		P_DEBUG("Destroying application pool...");
 		pool->destroy();
+		uninstallDiagnosticsDumper();
 		pool.reset();
-		requestHandler.reset();
 		poolLoop.stop();
 		requestLoop.stop();
+		requestHandler.reset();
+
+		if (!options.requestSocketLink.empty()) {
+			char path[PATH_MAX + 1];
+			ssize_t ret;
+			bool shouldUnlink;
+
+			ret = readlink(options.requestSocketLink.c_str(), path, PATH_MAX);
+			if (ret != -1) {
+				path[ret] = '\0';
+				// Only unlink if a new Flying Passenger instance hasn't overwritten the
+				// symlink.
+				// https://code.google.com/p/phusion-passenger/issues/detail?id=939
+				shouldUnlink = getRequestSocketFilename() == path;
+			} else {
+				shouldUnlink = true;
+			}
+
+			if (shouldUnlink) {
+				syscalls::unlink(options.requestSocketLink.c_str());
+			}
+		}
 		
 		P_TRACE(2, "All threads have been shut down.");
 	}
 	
 	void mainLoop() {
 		TRACE_POINT();
-		function<void ()> func;
+		boost::function<void ()> func;
 
 		func = boost::bind(&MessageServer::mainLoop, messageServer.get());
 		messageServerThread = ptr(new oxt::thread(
@@ -438,7 +554,7 @@ public:
 		poolLoop.start("Pool event loop", 0);
 		requestLoop.start("Request event loop", 0);
 
-		
+
 		/* Wait until the watchdog closes the feedback fd (meaning it
 		 * was killed) or until we receive an exit message.
 		 */
@@ -457,7 +573,6 @@ public:
 			uninstallDiagnosticsDumper();
 			throw SystemException("select() failed", e);
 		}
-		uninstallDiagnosticsDumper();
 		
 		if (FD_ISSET(feedbackFd, &fds)) {
 			/* If the watchdog has been killed then we'll kill all descendant
@@ -469,21 +584,29 @@ public:
 			 * inaccessible.
 			 */
 			P_DEBUG("Watchdog seems to be killed; forcing shutdown of all subprocesses");
+			// We send a SIGTERM first to allow processes to gracefully shut down.
+			syscalls::killpg(getpgrp(), SIGTERM);
+			usleep(500000);
 			syscalls::killpg(getpgrp(), SIGKILL);
 			_exit(2); // In case killpg() fails.
 		} else {
 			/* We received an exit command. We want to exit 5 seconds after
-			 * all worker threads have become inactive.
+			 * all clients have disconnected have become inactive.
 			 */
-			resetWorkerThreadInactivityTimers();
-			while (minWorkerThreadInactivityTime() < 5000) {
+			P_DEBUG("Received command to exit gracefully. "
+				"Waiting until 5 seconds after all clients have disconnected...");
+			pool->prepareForShutdown();
+			requestHandler->resetInactivityTime();
+			while (requestHandler->inactivityTime() < 5000) {
 				syscalls::usleep(250000);
 			}
+			P_DEBUG("It's now 5 seconds after all clients have disconnected. "
+				"Proceeding with graceful exit.");
 		}
 	}
 
 	string getRequestSocketFilename() const {
-		return generation->getPath() + "/request.socket";
+		return options.requestSocketFilename;
 	}
 };
 
@@ -497,12 +620,25 @@ public:
 int
 main(int argc, char *argv[]) {
 	TRACE_POINT();
-	AgentOptions options(initializeAgent(argc, argv, "PassengerHelperAgent"));
+	AgentOptionsPtr options;
+	try {
+		options = boost::make_shared<AgentOptions>(
+			initializeAgent(argc, argv, "PassengerHelperAgent"));
+	} catch (const VariantMap::MissingKeyException &e) {
+		fprintf(stderr, "Option required: %s\n", e.getKey().c_str());
+		return 1;
+	}
+	if (options->testBinary) {
+		printf("PASS\n");
+		exit(0);
+	}
+
+	P_DEBUG("Starting PassengerHelperAgent...");
 	MultiLibeio::init();
 	
 	try {
 		UPDATE_TRACE_POINT();
-		Server server(FileDescriptor(FEEDBACK_FD), options);
+		Server server(FileDescriptor(FEEDBACK_FD), *options);
 		P_WARN("PassengerHelperAgent online, listening at unix:" <<
 			server.getRequestSocketFilename());
 		

@@ -35,6 +35,7 @@
 #include <Constants.h>
 #include <ResourceLocator.h>
 #include <StaticString.h>
+#include <Utils.h>
 
 namespace Passenger {
 namespace ApplicationPool2 {
@@ -99,6 +100,8 @@ private:
 		result.push_back(&postexecChroot);
 		
 		result.push_back(&ruby);
+		result.push_back(&python);
+		result.push_back(&nodejs);
 		result.push_back(&loggingAgentAddress);
 		result.push_back(&loggingAgentUsername);
 		result.push_back(&loggingAgentPassword);
@@ -143,7 +146,10 @@ private:
 	}
 	
 public:
-	/*********** Spawn options that should be set manually ***********/
+	/*********** Spawn options that should be set by the caller ***********
+	 * These are the options that are relevant while spawning an application
+	 * process. These options are only used during spawning.
+	 */
 	
 	/**
 	 * The root directory of the application to spawn. In case of a Ruby on Rails
@@ -171,7 +177,7 @@ public:
 	StaticString appType;
 	
 	/** The command for spawning the application process. This is a list of
-	 * arguments, separated by '\1', e.g. "ruby\1foo.rb". Only used
+	 * arguments, separated by '\t', e.g. "ruby\tfoo.rb". Only used
 	 * during spawning and only if appType.empty(). */
 	StaticString startCommand;
 	
@@ -237,6 +243,18 @@ public:
 	 * is a Ruby app.
 	 */
 	StaticString ruby;
+
+	/**
+	 * Path to the Python interpreter to use, in case the application to spawn
+	 * is a Python app.
+	 */
+	StaticString python;
+
+	/**
+	 * Path to the Node.js command to use, in case the application to spawn
+	 * is a Node.js app.
+	 */
+	StaticString nodejs;
 	
 	/**
 	 * Any rights that the spawned application process may have. The SpawnManager
@@ -279,19 +297,62 @@ public:
 	bool raiseInternalError;
 	
 	
-	/*********** Per-group pool options that should be set manually ***********/
+	/*********** Per-group pool options that should be set by the caller ***********
+	 * These options dictate how Pool will manage processes, routing, etc. within
+	 * a single Group. These options are not process-specific, only group-specific.
+	 */
 	
 	/**
 	 * The minimum number of processes for the current group that the application
 	 * pool's cleaner thread should keep around.
 	 */
-	unsigned long minProcesses;
+	unsigned int minProcesses;
+
+	/**
+	 * The maximum number of processes that may be spawned
+	 * for this app root. This option only has effect if it's lower than
+	 * the pool size.
+	 *
+	 * A value of 0 means unspecified, and has no effect.
+	 */
+	unsigned int maxProcesses;
 	
 	/** The number of seconds that preloader processes may stay alive idling. */
 	long maxPreloaderIdleTime;
+
+	/**
+	 * The maximum number of processes inside a group that may be performing
+	 * out-of-band work at the same time.
+	 */
+	unsigned int maxOutOfBandWorkInstances;
+
+	/**
+	 * The maximum number of requests that may live in the Group.getWaitlist queue.
+	 * A value of 0 means unlimited.
+	 */
+	unsigned int maxRequestQueueSize;
+
+	/**
+	 * The Union Station key to use in case analytics logging is enabled.
+	 * It is used by Pool::collectAnalytics() and other administrative
+	 * functions which are called periodically. Because they do not belong
+	 * to any request, and they may still want to log to Union Station,
+	 * this key is stored in the per-group options structure.
+	 *
+	 * It is not used on a per-request basis. Per-request analytics logging
+	 * (and Union Station logging) uses the logger object in the `logger` field
+	 * instead.
+	 */
+	StaticString unionStationKey;
+
+	/*-----------------*/
 	
 	
-	/*********** Per-request options that should be set manually and that only matter to Pool ***********/
+	/*********** Per-request pool options that should be set by the caller ***********
+	 * These options also dictate how Pool will manage processes, etc. Unlike the
+	 * per-group options, these options are customizable on a per-request basis.
+	 * Their effects also don't persist longer than a single request.
+	 */
 	
 	/** Current request host name. */
 	StaticString hostName;
@@ -306,9 +367,9 @@ public:
 	UnionStation::LoggerPtr logger;
 
 	/**
-	 * The Union Station key to use in case analytics logging is enabled.
+	 * A sticky session ID for routing to a specific process.
 	 */
-	StaticString unionStationKey;
+	unsigned int stickySessionId;
 	
 	/**
 	 * A throttling rate for file stats. When set to a non-zero value N,
@@ -334,16 +395,14 @@ public:
 	 */
 	bool noop;
 
-	/** Specifies whether, if the pool is already full, the pool is allowed to
-	 * trash a non-idle process in order to free capacity. True by default.
+	/*-----------------*/
+	/*-----------------*/
+	
+	
+	/*********** Spawn options automatically set by Pool ***********
+	 * These options are passed to the Spawner. The Pool::get() caller may not
+	 * see these values.
 	 */
-	bool allowTrashingNonIdleProcesses;
-
-	/*-----------------*/
-	/*-----------------*/
-	
-	
-	/*********** Spawn options automatically set by Pool ***********/
 	
 	/** The secret key of the pool group that the spawned process is to belong to. */
 	StaticString groupSecret;
@@ -362,7 +421,9 @@ public:
 		baseURI                 = "/";
 		spawnMethod             = "smart";
 		defaultUser             = "nobody";
-		ruby                    = "ruby";
+		ruby                    = DEFAULT_RUBY;
+		python                  = DEFAULT_PYTHON;
+		nodejs                  = DEFAULT_NODEJS;
 		rights                  = DEFAULT_BACKEND_ACCOUNT_RIGHTS;
 		debugger                = false;
 		loadShellEnvvars        = true;
@@ -370,13 +431,16 @@ public:
 		raiseInternalError      = false;
 		
 		minProcesses            = 1;
+		maxProcesses            = 0;
 		maxPreloaderIdleTime    = -1;
+		maxOutOfBandWorkInstances = 1;
+		maxRequestQueueSize     = 100;
 		
+		stickySessionId         = 0;
 		statThrottleRate        = 0;
 		maxRequests             = 0;
 		noop                    = false;
-		allowTrashingNonIdleProcesses = true;
-		
+
 		/*********************************/
 	}
 	
@@ -461,8 +525,9 @@ public:
 	}
 	
 	Options &clearPerRequestFields() {
-		hostName = string();
-		uri      = string();
+		hostName = StaticString();
+		uri      = StaticString();
+		stickySessionId = 0;
 		noop     = false;
 		return clearLogger();
 	}
@@ -471,44 +536,77 @@ public:
 		logger.reset();
 		return *this;
 	}
+
+	enum FieldSet {
+		SPAWN_OPTIONS = 1 << 0,
+		PER_GROUP_POOL_OPTIONS = 1 << 1,
+		ALL_OPTIONS = ~0
+	};
 	
 	/**
-	 * Append any spawning-relevant information in this Options object
-	 * to the given string vector, except for environmentVariables.
+	 * Append information in this Options object to the given string vector, except
+	 * for environmentVariables. You can customize what information you want through
+	 * the `elements` argument.
 	 */
-	void toVector(vector<string> &vec, const ResourceLocator &resourceLocator) const {
-		if (vec.capacity() < vec.size() + 40) {
-			vec.reserve(vec.size() + 40);
+	void toVector(vector<string> &vec, const ResourceLocator &resourceLocator,
+		int fields = ALL_OPTIONS) const
+	{
+		if (fields & SPAWN_OPTIONS) {
+			appendKeyValue (vec, "app_root",           appRoot);
+			appendKeyValue (vec, "app_group_name",     getAppGroupName());
+			appendKeyValue (vec, "app_type",           appType);
+			appendKeyValue (vec, "start_command",      getStartCommand(resourceLocator));
+			appendKeyValue (vec, "startup_file",       getStartupFile());
+			appendKeyValue (vec, "process_title",      getProcessTitle());
+			appendKeyValue2(vec, "log_level",          logLevel);
+			appendKeyValue3(vec, "start_timeout",      startTimeout);
+			appendKeyValue (vec, "environment",        environment);
+			appendKeyValue (vec, "base_uri",           baseURI);
+			appendKeyValue (vec, "spawn_method",       spawnMethod);
+			appendKeyValue (vec, "user",               user);
+			appendKeyValue (vec, "group",              group);
+			appendKeyValue (vec, "default_user",       defaultUser);
+			appendKeyValue (vec, "default_group",      defaultGroup);
+			appendKeyValue (vec, "restart_dir",        restartDir);
+			appendKeyValue (vec, "preexec_chroot",     preexecChroot);
+			appendKeyValue (vec, "postexec_chroot",    postexecChroot);
+			appendKeyValue (vec, "ruby",               ruby);
+			appendKeyValue (vec, "python",             python);
+			appendKeyValue (vec, "nodejs",             nodejs);
+			appendKeyValue (vec, "logging_agent_address",  loggingAgentAddress);
+			appendKeyValue (vec, "logging_agent_username", loggingAgentUsername);
+			appendKeyValue (vec, "logging_agent_password", loggingAgentPassword);
+			appendKeyValue4(vec, "debugger",           debugger);
+			appendKeyValue4(vec, "analytics",          analytics);
+
+			appendKeyValue (vec, "group_secret",       groupSecret);
+
+			/*********************************/
+		}
+		if (fields & PER_GROUP_POOL_OPTIONS) {
+			appendKeyValue3(vec, "min_processes",       minProcesses);
+			appendKeyValue3(vec, "max_processes",       maxProcesses);
+			appendKeyValue2(vec, "max_preloader_idle_time", maxPreloaderIdleTime);
+			appendKeyValue3(vec, "max_out_of_band_work_instances", maxOutOfBandWorkInstances);
+			appendKeyValue (vec, "union_station_key",   unionStationKey);
 		}
 		
-		appendKeyValue (vec, "app_root",           appRoot);
-		appendKeyValue (vec, "app_group_name",     getAppGroupName());
-		appendKeyValue (vec, "app_type",           appType);
-		appendKeyValue (vec, "start_command",      getStartCommand(resourceLocator));
-		appendKeyValue (vec, "process_title",      getProcessTitle());
-		appendKeyValue2(vec, "log_level",          logLevel);
-		appendKeyValue3(vec, "start_timeout",      startTimeout);
-		appendKeyValue (vec, "environment",        environment);
-		appendKeyValue (vec, "base_uri",           baseURI);
-		appendKeyValue (vec, "spawn_method",       spawnMethod);
-		appendKeyValue (vec, "user",               user);
-		appendKeyValue (vec, "group",              group);
-		appendKeyValue (vec, "default_user",       defaultUser);
-		appendKeyValue (vec, "default_group",      defaultGroup);
-		appendKeyValue (vec, "restart_dir",        restartDir);
-		appendKeyValue (vec, "preexec_chroot",     preexecChroot);
-		appendKeyValue (vec, "postexec_chroot",    postexecChroot);
-		appendKeyValue (vec, "ruby",               ruby);
-		appendKeyValue (vec, "logging_agent_address",  loggingAgentAddress);
-		appendKeyValue (vec, "logging_agent_username", loggingAgentUsername);
-		appendKeyValue (vec, "logging_agent_password", loggingAgentPassword);
-		appendKeyValue4(vec, "debugger",           debugger);
-		appendKeyValue4(vec, "analytics",          analytics);
-		appendKeyValue (vec, "union_station_key",  unionStationKey);
-		
-		appendKeyValue (vec, "group_secret",       groupSecret);
-		
 		/*********************************/
+	}
+
+	template<typename Stream>
+	void toXml(Stream &stream, const ResourceLocator &resourceLocator,
+		int fields = ALL_OPTIONS) const
+	{
+		vector<string> args;
+		unsigned int i;
+		
+		toVector(args, resourceLocator, fields);
+		for (i = 0; i < args.size(); i += 2) {
+			stream << "<" << args[i] << ">";
+			stream << escapeForXml(args[i + 1]);
+			stream << "</" << args[i] << ">";
+		}
 	}
 	
 	/**
@@ -525,22 +623,30 @@ public:
 	
 	string getStartCommand(const ResourceLocator &resourceLocator) const {
 		if (appType == "classic-rails") {
-			return ruby + "\1" + resourceLocator.getHelperScriptsDir() + "/classic-rails-loader.rb";
+			return ruby + "\t" + resourceLocator.getHelperScriptsDir() + "/classic-rails-loader.rb";
 		} else if (appType == "rack") {
-			return ruby + "\1" + resourceLocator.getHelperScriptsDir() + "/rack-loader.rb";
+			return ruby + "\t" + resourceLocator.getHelperScriptsDir() + "/rack-loader.rb";
 		} else if (appType == "wsgi") {
-			return "python\1" + resourceLocator.getHelperScriptsDir() + "/wsgi-loader.py";
+			return python + "\t" + resourceLocator.getHelperScriptsDir() + "/wsgi-loader.py";
+		} else if (appType == "node") {
+			return nodejs + "\t" + resourceLocator.getHelperScriptsDir() + "/node-loader.js";
+		} else if (appType == "meteor") {
+			return ruby + "\t" + resourceLocator.getHelperScriptsDir() + "/meteor-loader.rb";
 		} else {
 			return startCommand;
 		}
 	}
 	
 	StaticString getStartupFile() const {
-		const char *result = getAppTypeStartupFile(getAppType(appType));
-		if (result == NULL) {
-			return startupFile;
+		if (startupFile.empty()) {
+			const char *result = getAppTypeStartupFile(getAppType(appType));
+			if (result == NULL) {
+				return "";
+			} else {
+				return result;
+			}
 		} else {
-			return result;
+			return startupFile;
 		}
 	}
 	

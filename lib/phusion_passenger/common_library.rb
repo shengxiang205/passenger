@@ -102,11 +102,11 @@ class CommonLibraryBuilder
 
 	def define_tasks(extra_compiler_flags = nil)
 		flags =  "-Iext -Iext/common #{LIBEV_CFLAGS} #{extra_compiler_flags} "
-		flags << "#{PlatformInfo.portability_cflags} #{EXTRA_CXXFLAGS}"
-		flags.strip!
+		cflags = (flags + EXTRA_CFLAGS).strip
+		cxxflags = (flags + EXTRA_CXXFLAGS).strip
 
 		group_all_components_by_category.each_pair do |category, object_names|
-			define_category_tasks(category, object_names, flags)
+			define_category_tasks(category, object_names, cflags, cxxflags)
 		end
 
 		task("#{@namespace}:clean") do
@@ -117,7 +117,7 @@ class CommonLibraryBuilder
 	end
 
 private
-	def define_category_tasks(category, object_names, flags)
+	def define_category_tasks(category, object_names, cflags, cxxflags)
 		object_filenames = object_filenames_for(object_names)
 
 		object_names.each do |object_name|
@@ -128,9 +128,9 @@ private
 			file(object_file => dependencies_for(options)) do
 				ensure_directory_exists(File.dirname(object_file))
 				if source_file =~ /\.c$/
-					compile_c(source_file, "#{flags} -o #{object_file}")
+					compile_c(source_file, "#{cflags} -o #{object_file}")
 				else
-					compile_cxx(source_file, "#{flags} -o #{object_file}")
+					compile_cxx(source_file, "#{cxxflags} -o #{object_file}")
 				end
 			end
 		end
@@ -320,6 +320,12 @@ COMMON_LIBRARY = CommonLibraryBuilder.new do
 			Logging.cpp
 			Logging.h
 		)
+	define_component 'Exceptions.o',
+		:source   => 'Exceptions.cpp',
+		:category => :base,
+		:deps     => %w(
+			Exceptions.h
+		)
 	define_component 'Utils/SystemTime.o',
 		:source   => 'Utils/SystemTime.cpp',
 		:category => :base,
@@ -361,6 +367,12 @@ COMMON_LIBRARY = CommonLibraryBuilder.new do
 			Utils/CachedFileStat.h
 			Utils/CachedFileStat.hpp
 		)
+	define_component 'Utils/LargeFiles.o',
+		:source   => 'Utils/LargeFiles.cpp',
+		:category => :other,
+		:deps     => %w(
+			Utils/LargeFiles.h
+		)
 	define_component 'ApplicationPool2/Implementation.o',
 		:source   => 'ApplicationPool2/Implementation.cpp',
 		:category => :other,
@@ -388,21 +400,11 @@ COMMON_LIBRARY = CommonLibraryBuilder.new do
 			Utils/StrIntUtils.h
 			Utils/CachedFileStat.h
 		)
-	define_component 'AccountsDatabase.o',
-		:source   => 'AccountsDatabase.cpp',
-		:category => :other,
-		:deps     => %w(
-			AccountsDatabase.h
-			RandomGenerator.h
-			Constants.h
-			Utils.h
-		)
 	define_component 'AgentsStarter.o',
 		:source   => 'AgentsStarter.cpp',
 		:category => :other,
 		:deps     => %w(
 			AgentsStarter.h
-			AgentsStarter.hpp
 			ResourceLocator.h
 			MessageClient.h
 			ServerInstanceDir.h

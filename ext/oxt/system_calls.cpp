@@ -72,6 +72,10 @@ oxt::setup_syscall_interruption_support() {
 
 void
 oxt::setup_random_failure_simulation(const ErrorChance *_errorChances, unsigned int n) {
+	if (n > OXT_MAX_ERROR_CHANCES) {
+		throw std::runtime_error("Number of error chances may not exceed OXT_MAX_ERROR_CHANCES");
+	}
+
 	ErrorChance *storage = new ErrorChance[n];
 	for (unsigned int i = 0; i < n; i++) {
 		storage[i] = _errorChances[i];
@@ -84,7 +88,7 @@ static bool
 shouldSimulateFailure() {
 	if (nErrorChances > 0) {
 		double number = random() / (double) RAND_MAX;
-		const ErrorChance *candidates[nErrorChances];
+		const ErrorChance *candidates[OXT_MAX_ERROR_CHANCES];
 		unsigned int i, n = 0;
 
 		for (i = 0; i < nErrorChances; i++) {
@@ -714,7 +718,13 @@ syscalls::waitpid(pid_t pid, int *status, int options) {
  *************************************/
 
 #ifdef OXT_THREAD_LOCAL_KEYWORD_SUPPORTED
-	__thread bool this_thread::_syscalls_interruptable = true;
+	/* This variable is an int instead of a bool, because a bug in GCC 4.6
+	 * can cause segmentation faults for bool TLS variables.
+	 * https://code.google.com/p/phusion-passenger/issues/detail?id=902
+	 * http://stackoverflow.com/questions/20410943/segmentation-fault-when-accessing-statically-initialized-thread-variable?noredirect=1#comment30483943_20410943
+	 * https://bugzilla.redhat.com/show_bug.cgi?id=731228
+	 */
+	__thread int this_thread::_syscalls_interruptable = 1;
 
 	bool
 	this_thread::syscalls_interruptable() {

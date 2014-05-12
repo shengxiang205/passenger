@@ -1,6 +1,7 @@
 .cache
 .DS_Store
 .rbx
+.vagrant
 autom4te.cache
 *.o
 *.so
@@ -21,8 +22,7 @@ autom4te.cache
 *.mode2v3
 xcuserdata
 /config.rb
-/agents
-/libout
+/buildout
 build/cache
 ext/common/libboost_oxt
 ext/common/libpassenger_common
@@ -41,12 +41,15 @@ ext/libeio/Makefile
 ext/libeio/config.h
 ext/libeio/config.log
 ext/libeio/config.status
+ext/libeio/eio.3
+ext/libeio/eio.pod
 ext/ruby/*/Makefile
 ext/ruby/*/mkmf.log
 ext/*.a
 doc/rdoc
 doc/cxxapi
 doc/*.html
+helper-scripts/download_binaries/Makefile
 test/.gdbinit
 test/test.log
 test/apache2.log
@@ -62,3 +65,4 @@ test/stub/zsfa/mycook
 test/stub/zsfa/foo
 test/support/allocate_memory
 pkg
+node_modules

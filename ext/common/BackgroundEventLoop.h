@@ -46,7 +46,7 @@ namespace Passenger {
 	struct BackgroundEventLoop {
 		struct ev_loop *loop;
 		ev_async *async;
-		shared_ptr<SafeLibev> safe;
+		boost::shared_ptr<SafeLibev> safe;
 		BackgroundEventLoopPrivate *priv;
 		
 		BackgroundEventLoop(bool scalable = false);
@@ -54,6 +54,7 @@ namespace Passenger {
 		
 		void start(const string &threadName = "", unsigned int stackSize = 1024 * 1024);
 		void stop();
+		bool isStarted() const;
 	};
 
 }

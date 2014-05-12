@@ -2,6 +2,8 @@ if GC.respond_to?(:copy_on_write_friendly?) && !GC.copy_on_write_friendly?
 	GC.copy_on_write_friendly = true
 end
 
+RUBY_VERSION_INT = RUBY_VERSION.split('.')[0..2].join.to_i
+
 source_root = File.expand_path(File.dirname(__FILE__) + "/../..")
 Dir.chdir("#{source_root}/test")
 
@@ -16,8 +18,19 @@ rescue Errno::ENOENT
 	exit 1
 end
 
-DEBUG      = ['1', 'y', 'yes'].include?(ENV['DEBUG'].to_s.downcase)
-AGENTS_DIR = "#{source_root}/agents"
+def boolean_option(name, default_value = false)
+	value = ENV[name]
+	if value.nil? || value.empty?
+		return default_value
+	else
+		return value == "yes" || value == "on" || value == "true" || value == "1"
+	end
+end
+
+DEBUG = boolean_option('DEBUG')
+TEST_CLASSIC_RAILS = boolean_option('TEST_CLASSIC_RAILS', Gem::VERSION <= '1.9')
+
+ENV.delete('PASSENGER_DEBUG')
 
 $LOAD_PATH.unshift("#{source_root}/lib")
 $LOAD_PATH.unshift("#{source_root}/test")
@@ -25,12 +38,12 @@ $LOAD_PATH.unshift("#{source_root}/test")
 require 'thread'
 require 'timeout'
 require 'fileutils'
-require 'support/test_helper'
 require 'phusion_passenger'
 PhusionPassenger.locate_directories
-require 'phusion_passenger/debug_logging'
-require 'phusion_passenger/utils'
-require 'phusion_passenger/utils/tmpdir'
+PhusionPassenger.require_passenger_lib 'debug_logging'
+PhusionPassenger.require_passenger_lib 'utils'
+PhusionPassenger.require_passenger_lib 'utils/tmpdir'
+require 'support/test_helper'
 
 include TestHelper
 

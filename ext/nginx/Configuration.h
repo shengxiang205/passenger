@@ -33,31 +33,13 @@
 
 typedef struct {
     ngx_http_upstream_conf_t upstream_config;
-    ngx_str_t    index;
     ngx_array_t *flushes;
     ngx_array_t *vars_len;
     ngx_array_t *vars;
-    ngx_array_t *vars_source;
+    /** Raw SCGI header data for this location is cached here. */
+    ngx_str_t    options_cache;
     
-    ngx_flag_t   enabled;
-    ngx_flag_t   friendly_error_pages;
-    ngx_flag_t   union_station_support;
-    ngx_flag_t   debugger;
-    ngx_flag_t   show_version_in_header;
-    ngx_str_t    ruby;
-    ngx_str_t    environment;
-    ngx_str_t    user;
-    ngx_str_t    group;
-    ngx_str_t    spawn_method;
-    ngx_str_t    app_group_name;
-    ngx_str_t    app_root;
-    ngx_str_t    app_rights;
-    ngx_int_t    min_instances;
-    ngx_int_t    max_requests;
-    ngx_int_t    max_preloader_idle_time;
-    ngx_str_t    union_station_key;
-    ngx_array_t *base_uris;
-    ngx_array_t *union_station_filters;
+    #include "ConfigurationFields.h"
 
 #if (NGX_HTTP_CACHE)
     ngx_http_complex_value_t cache_key;
@@ -68,11 +50,13 @@ typedef struct {
 
 typedef struct {
     ngx_str_t    root_dir;
+    ngx_array_t *ctl;
+    ngx_str_t    default_ruby;
     ngx_int_t    log_level;
     ngx_str_t    debug_log_file;
+    ngx_str_t    temp_dir;
     ngx_flag_t   abort_on_startup_error;
     ngx_uint_t   max_pool_size;
-    ngx_uint_t   max_instances_per_app;
     ngx_uint_t   pool_idle_time;
     ngx_flag_t   user_switching;
     ngx_str_t    default_user;

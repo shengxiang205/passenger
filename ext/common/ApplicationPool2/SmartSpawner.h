@@ -35,7 +35,7 @@ using namespace boost;
 using namespace oxt;
 
 
-class SmartSpawner: public Spawner, public enable_shared_from_this<SmartSpawner> {
+class SmartSpawner: public Spawner, public boost::enable_shared_from_this<SmartSpawner> {
 private:
 	/**
 	 * Structure containing arguments and working state for negotiating
@@ -49,16 +49,12 @@ private:
 		BackgroundIOCapturerPtr stderrCapturer;
 		DebugDirPtr debugDir;
 		const Options *options;
-		bool forwardStderr;
-		int forwardStderrTo;
 
 		/****** Working state ******/
 		unsigned long long timeout;
 
 		StartupDetails() {
 			options = NULL;
-			forwardStderr = false;
-			forwardStderrTo = STDERR_FILENO;
 			timeout = 0;
 		}
 	};
@@ -110,9 +106,9 @@ private:
 		string agentsDir = resourceLocator.getAgentsDir();
 		vector<string> command;
 		
-		if (options.loadShellEnvvars) {
-			command.push_back("bash");
-			command.push_back("bash");
+		if (shouldLoadShellEnvvars(options, preparation)) {
+			command.push_back(preparation.shell);
+			command.push_back(preparation.shell);
 			command.push_back("-lc");
 			command.push_back("exec \"$@\"");
 			command.push_back("SpawnPreparerShell");
@@ -120,9 +116,12 @@ private:
 			command.push_back(agentsDir + "/SpawnPreparer");
 		}
 		command.push_back(agentsDir + "/SpawnPreparer");
+		command.push_back(preparation.appRoot);
 		command.push_back(serializeEnvvarsFromPoolOptions(options));
 		command.push_back(preloaderCommand[0]);
-		command.push_back("Passenger AppPreloader: " + options.appRoot);
+		// Note: do not try to set a process title here.
+		// https://code.google.com/p/phusion-passenger/issues/detail?id=855
+		command.push_back(preloaderCommand[0]);
 		for (unsigned int i = 1; i < preloaderCommand.size(); i++) {
 			command.push_back(preloaderCommand[i]);
 		}
@@ -156,7 +155,8 @@ private:
 		// remaining stderr output for at most 2 seconds.
 		if (errorKind != SpawnException::PRELOADER_STARTUP_TIMEOUT
 		 && errorKind != SpawnException::APP_STARTUP_TIMEOUT
-		 && stderrCapturer != NULL) {
+		 && stderrCapturer != NULL)
+		{
 			bool done = false;
 			unsigned long long timeout = 2000;
 			while (!done) {
@@ -183,7 +183,10 @@ private:
 		
 		// Now throw SpawnException with the captured stderr output
 		// as error response.
-		SpawnException e(msg, stderrOutput, false, errorKind);
+		SpawnException e(msg,
+			createErrorPageFromStderrOutput(msg, errorKind, stderrOutput),
+			true,
+			errorKind);
 		e.setPreloaderCommand(getPreloaderCommandString());
 		annotatePreloaderException(e, debugDir);
 		throw e;
@@ -208,11 +211,11 @@ private:
 		checkChrootDirectories(options);
 		
 		shared_array<const char *> args;
-		vector<string> command = createRealPreloaderCommand(options, args);
 		preparation = prepareSpawn(options);
+		vector<string> command = createRealPreloaderCommand(options, args);
 		SocketPair adminSocket = createUnixSocketPair();
 		Pipe errorPipe = createPipe();
-		DebugDirPtr debugDir = make_shared<DebugDir>(preparation.uid, preparation.gid);
+		DebugDirPtr debugDir = boost::make_shared<DebugDir>(preparation.uid, preparation.gid);
 		pid_t pid;
 		
 		pid = syscalls::fork();
@@ -261,13 +264,13 @@ private:
 			details.stderrCapturer =
 				make_shared<BackgroundIOCapturer>(
 					errorPipe.first,
-					string("[App ") + toString(pid) + " stderr] ",
-					config->forwardStderr);
+					pid,
+					// The cast works around a compilation problem in Clang.
+					(const char *) "stderr");
 			details.stderrCapturer->start();
 			details.debugDir = debugDir;
 			details.options = &options;
 			details.timeout = options.startTimeout * 1000;
-			details.forwardStderr = config->forwardStderr;
 			
 			{
 				this_thread::restore_interruption ri(di);
@@ -276,19 +279,19 @@ private:
 			}
 			this->adminSocket = adminSocket.second;
 			{
-				lock_guard<boost::mutex> l(simpleFieldSyncher);
+				boost::lock_guard<boost::mutex> l(simpleFieldSyncher);
 				this->pid = pid;
 			}
 			
 			PipeWatcherPtr watcher;
 
-			watcher = make_shared<PipeWatcher>(adminSocket.second,
-				"stdout", pid, config->forwardStdout);
+			watcher = boost::make_shared<PipeWatcher>(adminSocket.second,
+				"stdout", pid);
 			watcher->initialize();
 			watcher->start();
 
-			watcher = make_shared<PipeWatcher>(errorPipe.first,
-				"stderr", pid, config->forwardStderr);
+			watcher = boost::make_shared<PipeWatcher>(errorPipe.first,
+				"stderr", pid);
 			watcher->initialize();
 			watcher->start();
 			
@@ -321,7 +324,7 @@ private:
 			syscalls::unlink(filename.c_str());
 		}
 		{
-			lock_guard<boost::mutex> l(simpleFieldSyncher);
+			boost::lock_guard<boost::mutex> l(simpleFieldSyncher);
 			pid = -1;
 		}
 		socketAddress.clear();
@@ -331,25 +334,28 @@ private:
 	void sendStartupRequest(StartupDetails &details) {
 		TRACE_POINT();
 		try {
-			writeExact(details.adminSocket,
-				"You have control 1.0\n"
+			string data = "You have control 1.0\n"
 				"passenger_root: " + resourceLocator.getRoot() + "\n"
 				"ruby_libdir: " + resourceLocator.getRubyLibDir() + "\n"
 				"passenger_version: " PASSENGER_VERSION "\n"
-				"generation_dir: " + generation->getPath() + "\n",
-				&details.timeout);
+				"generation_dir: " + generation->getPath() + "\n";
 
 			vector<string> args;
 			vector<string>::const_iterator it, end;
-			details.options->toVector(args, resourceLocator);
+			details.options->toVector(args, resourceLocator, Options::SPAWN_OPTIONS);
 			for (it = args.begin(); it != args.end(); it++) {
 				const string &key = *it;
 				it++;
 				const string &value = *it;
-				writeExact(details.adminSocket,
-					key + ": " + value + "\n",
-					&details.timeout);
+				data.append(key + ": " + value + "\n");
 			}
+
+			vector<StaticString> lines;
+			split(data, '\n', lines);
+			foreach (const StaticString line, lines) {
+				P_DEBUG("[App " << details.pid << " stdin >>] " << line);
+			}
+			writeExact(details.adminSocket, data, &details.timeout);
 			writeExact(details.adminSocket, "\n", &details.timeout);
 		} catch (const SystemException &e) {
 			if (e.code() == EPIPE) {
@@ -523,11 +529,19 @@ private:
 	}
 	
 	void handleInvalidResponseType(StartupDetails &details, const string &line) {
-		throwPreloaderSpawnException("An error occurred while starting up "
-			"the preloader. It sent an unknown response type \"" +
-			cEscapeString(line) + "\".",
-			SpawnException::PRELOADER_STARTUP_PROTOCOL_ERROR,
-			details);
+		if (line.empty()) {
+			throwPreloaderSpawnException("An error occurred while starting up "
+				"the preloader. It exited before signalling successful "
+				"startup back to " PROGRAM_NAME ".",
+				SpawnException::PRELOADER_STARTUP_ERROR,
+				details);
+		} else {
+			throwPreloaderSpawnException("An error occurred while starting up "
+				"the preloader. It sent an unknown response type \"" +
+				cEscapeString(line) + "\".",
+				SpawnException::PRELOADER_STARTUP_PROTOCOL_ERROR,
+				details);
+		}
 	}
 	
 	string negotiatePreloaderStartup(StartupDetails &details) {
@@ -609,7 +623,7 @@ private:
 		vector<string>::const_iterator it;
 		
 		writeExact(fd, "spawn\n", &timeout);
-		options.toVector(args, resourceLocator);
+		options.toVector(args, resourceLocator, Options::SPAWN_OPTIONS);
 		for (it = args.begin(); it != args.end(); it++) {
 			const string &key = *it;
 			it++;
@@ -709,14 +723,14 @@ public:
 		m_lastUsed = SystemTime::getUsec();
 
 		if (_config == NULL) {
-			config = make_shared<SpawnerConfig>();
+			config = boost::make_shared<SpawnerConfig>();
 		} else {
 			config = _config;
 		}
 	}
 	
 	virtual ~SmartSpawner() {
-		lock_guard<boost::mutex> l(syncher);
+		boost::lock_guard<boost::mutex> l(syncher);
 		stopPreloader();
 	}
 	
@@ -729,11 +743,11 @@ public:
 		possiblyRaiseInternalError(options);
 
 		{
-			lock_guard<boost::mutex> l(simpleFieldSyncher);
+			boost::lock_guard<boost::mutex> l(simpleFieldSyncher);
 			m_lastUsed = SystemTime::getUsec();
 		}
 		UPDATE_TRACE_POINT();
-		lock_guard<boost::mutex> l(syncher);
+		boost::lock_guard<boost::mutex> l(syncher);
 		if (!preloaderStarted()) {
 			UPDATE_TRACE_POINT();
 			startPreloader();
@@ -759,7 +773,6 @@ public:
 		details.adminSocket = result.adminSocket;
 		details.io = result.io;
 		details.options = &options;
-		details.forwardStderr = config->forwardStderr;
 		ProcessPtr process = negotiateSpawn(details);
 		P_DEBUG("Process spawning done: appRoot=" << options.appRoot <<
 			", pid=" << process->pid);
@@ -773,20 +786,20 @@ public:
 	virtual void cleanup() {
 		TRACE_POINT();
 		{
-			lock_guard<boost::mutex> l(simpleFieldSyncher);
+			boost::lock_guard<boost::mutex> l(simpleFieldSyncher);
 			m_lastUsed = SystemTime::getUsec();
 		}
-		lock_guard<boost::mutex> lock(syncher);
+		boost::lock_guard<boost::mutex> lock(syncher);
 		stopPreloader();
 	}
 
 	virtual unsigned long long lastUsed() const {
-		lock_guard<boost::mutex> lock(simpleFieldSyncher);
+		boost::lock_guard<boost::mutex> lock(simpleFieldSyncher);
 		return m_lastUsed;
 	}
 	
 	pid_t getPreloaderPid() const {
-		lock_guard<boost::mutex> lock(simpleFieldSyncher);
+		boost::lock_guard<boost::mutex> lock(simpleFieldSyncher);
 		return pid;
 	}
 };

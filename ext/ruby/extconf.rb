@@ -35,8 +35,30 @@ if RUBY_PLATFORM =~ /solaris/
 end
 
 have_header('alloca.h')
+have_header('ruby/version.h')
 have_header('ruby/io.h')
+have_var('ruby_version')
+have_func('rb_thread_io_blocking_region')
 
 with_cflags($CFLAGS) do
 	create_makefile('passenger_native_support')
+	if RUBY_PLATFORM =~ /solaris/
+		# Fix syntax error in Solaris /usr/ccs/bin/make.
+		# https://code.google.com/p/phusion-passenger/issues/detail?id=999
+		makefile = File.read("Makefile")
+		makefile.sub!(/^ECHO = .*/, "ECHO = echo")
+		File.open("Makefile", "w") do |f|
+			f.write(makefile)
+		end
+	elsif RUBY_PLATFORM =~ /darwin/
+		# The OS X Clang 503.0.38 update (circa March 15 2014) broke
+		# /usr/bin/ruby's mkmf. mkmf inserts -multiply_definedsuppress
+		# into the Makefile, but that flag is no longer supported by
+		# Clang. We remove this manually.
+		makefile = File.read("Makefile")
+		makefile.sub!(/-multiply_definedsuppress/, "")
+		File.open("Makefile", "w") do |f|
+			f.write(makefile)
+		end
+	end
 end

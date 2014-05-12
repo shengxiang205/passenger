@@ -21,19 +21,19 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
-require 'phusion_passenger/utils'   # So that we can know whether #writev is supported.
+PhusionPassenger.require_passenger_lib 'utils'   # So that we can know whether #writev is supported.
 
 module PhusionPassenger
 module Utils
 
-# Some frameworks (e.g. Merb) call _seek_ and _rewind_ on the input stream
+# Some frameworks (e.g. Merb) call `seek` and `rewind` on the input stream
 # if it responds to these methods. In case of Phusion Passenger, the input
-# stream is a socket, and altough socket objects respond to _seek_ and
-# _rewind_, calling these methods will raise an exception. We don't want
+# stream is a socket, and altough socket objects respond to `seek` and
+# `rewind`, calling these methods will raise an exception. We don't want
 # this to happen so in AbstractRequestHandler we wrap the client socket
 # into an UnseekableSocket wrapper, which doesn't respond to these methods.
 #
-# We used to dynamically undef _seek_ and _rewind_ on sockets, but this
+# We used to dynamically undef `seek` and `rewind` on sockets, but this
 # blows the Ruby interpreter's method cache and made things slower.
 # Wrapping a socket is faster despite extra method calls.
 #
@@ -87,8 +87,13 @@ class UnseekableSocket
 	def binmode
 	end
 	
+	# This makes select() work.
 	def to_io
-		self
+		@socket
+	end
+
+	def fileno
+		@socket.fileno
 	end
 	
 	def addr
@@ -99,6 +104,12 @@ class UnseekableSocket
 	
 	def write(string)
 		@socket.write(string)
+	rescue => e
+		raise annotate(e)
+	end
+
+	def write_nonblock(string)
+		@socket.write_nonblock(string)
 	rescue => e
 		raise annotate(e)
 	end
@@ -121,6 +132,24 @@ class UnseekableSocket
 		raise annotate(e)
 	end if IO.method_defined?(:writev3)
 	
+	def send(*args)
+		@socket.send(*args)
+	rescue => e
+		raise annotate(e)
+	end
+
+	def sendmsg(*args)
+		@socket.sendmsg(*args)
+	rescue => e
+		raise annotate(e)
+	end
+
+	def sendmsg_nonblock(*args)
+		@socket.sendmsg_nonblock(*args)
+	rescue => e
+		raise annotate(e)
+	end
+
 	def puts(*args)
 		@socket.puts(*args)
 	rescue => e
@@ -138,6 +167,12 @@ class UnseekableSocket
 	rescue => e
 		raise annotate(e)
 	end
+
+	def read_nonblock(*args)
+		@socket.read_nonblock(*args)
+	rescue => e
+		raise annotate(e)
+	end
 	
 	def readpartial(*args)
 		@socket.readpartial(*args)
@@ -147,6 +182,24 @@ class UnseekableSocket
 	
 	def readline
 		@socket.readline
+	rescue => e
+		raise annotate(e)
+	end
+
+	def recv(*args)
+		@socket.recv(*args)
+	rescue => e
+		raise annotate(e)
+	end
+
+	def recvfrom(*args)
+		@socket.recvfrom(*args)
+	rescue => e
+		raise annotate(e)
+	end
+
+	def recvfrom_nonblock(*args)
+		@socket.recvfrom_nonblock(*args)
 	rescue => e
 		raise annotate(e)
 	end
@@ -195,6 +248,20 @@ private
 	def annotate(exception)
 		exception.instance_variable_set(:"@from_unseekable_socket", @socket.object_id)
 		return exception
+	end
+
+	def raise_error_because_activity_disallowed!
+		raise IOError, "It is not possible to read or write from the client socket because the current."
+	end
+
+	if ''.respond_to?(:force_encoding)
+		def binary_string(str)
+			return ''.force_encoding('binary')
+		end
+	else
+		def binary_string(str)
+			return ''
+		end
 	end
 end
 

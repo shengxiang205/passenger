@@ -25,12 +25,59 @@
 #ifndef _PASSENGER_EXCEPTIONS_H_
 #define _PASSENGER_EXCEPTIONS_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Provides helper structs and functions for translating C++ exceptions
+ * into C error objects.
+ */
+
+#define PP_NO_ERRNO -1
+
+struct PP_Error {
+	/** The exception message. */
+	const char *message;
+	/** If the original exception was a SystemException, then this
+	 * field is set to the corresponding errno value. Otherwise, it
+	 * is set to PP_NO_ERRNO.
+	 */
+	int errnoCode;
+	int messageIsStatic: 1;
+};
+
+typedef struct PP_Error PP_Error;
+
+void pp_error_init(PP_Error *error);
+void pp_error_destroy(PP_Error *error);
+
+#ifdef __cplusplus
+}
+#endif
+
+
+#ifdef __cplusplus
+
 #include <oxt/tracable_exception.hpp>
 #include <string>
 #include <map>
+#include <exception>
 #include <sstream>
 #include <cstring>
 #include <cassert>
+
+
+/**
+ * Use as follows:
+ *
+ *     try {
+ *         ...
+ *     } catch (const std::exception &e) {
+ *         pp_error_set(e, error);
+ *     }
+ */
+void pp_error_set(const std::exception &ex, PP_Error *error);
+
 
 /**
  * @defgroup Exceptions Exceptions
@@ -199,16 +246,24 @@ public:
 
 /**
  * Thrown when SpawnManager or ApplicationPool fails to spawn an application
- * instance. The exception may contain an error page, which is a user-friendly
- * HTML page with details about the error.
+ * instance. The exception may contain an error page. This error page contains
+ * detailed information about the error and may be in HTML format. The error
+ * page always contains enough information so that showing `what()` is not
+ * necessary.
  */
 class SpawnException: public oxt::tracable_exception {
 public:
 	enum ErrorKind {
 		UNDEFINED_ERROR,
+		/** The preloader failed to start, not due to a wrong protocol message. */
+		PRELOADER_STARTUP_ERROR,
+		/** The preloader sent a wrong protocol message during startup. */
 		PRELOADER_STARTUP_PROTOCOL_ERROR,
 		PRELOADER_STARTUP_TIMEOUT,
 		PRELOADER_STARTUP_EXPLAINABLE_ERROR,
+		/** The application failed to start, not due to a wrong protocol message. */
+		APP_STARTUP_ERROR,
+		/** The application sent a wrong protocol message during startup. */
 		APP_STARTUP_PROTOCOL_ERROR,
 		APP_STARTUP_TIMEOUT,
 		APP_STARTUP_EXPLAINABLE_ERROR
@@ -236,10 +291,6 @@ public:
 		bool isHTML = true, ErrorKind errorKind = UNDEFINED_ERROR)
 		: msg(message), m_errorPage(errorPage)
 	{
-		assert(!isHTML
-			|| errorKind == UNDEFINED_ERROR
-			|| errorKind == PRELOADER_STARTUP_EXPLAINABLE_ERROR
-			|| errorKind == APP_STARTUP_EXPLAINABLE_ERROR);
 		this->errorKind = errorKind;
 		m_hasErrorPage = true;
 		m_isHTML = isHTML;
@@ -250,7 +301,7 @@ public:
 	virtual const char *what() const throw() {
 		return msg.c_str();
 	}
-	
+
 	bool hasErrorPage() const {
 		return m_hasErrorPage;
 	}
@@ -316,10 +367,29 @@ public:
 		: msg(message)
 		{ }
 	
+	GetAbortedException(const oxt::tracable_exception::no_backtrace &tag)
+		: oxt::tracable_exception(tag)
+		{ }
+
 	virtual ~GetAbortedException() throw() {}
 	
 	virtual const char *what() const throw() {
 		return msg.c_str();
+	}
+};
+
+/**
+ * Indicates that a Pool::get() or Pool::asyncGet() request was denied because
+ * the getWaitlist queue was full.
+ */
+class RequestQueueFullException: public GetAbortedException {
+public:
+	RequestQueueFullException()
+		: GetAbortedException(oxt::tracable_exception::no_backtrace())
+		{ }
+	
+	virtual const char *what() const throw() {
+		return "Request queue is full";
 	}
 };
 
@@ -432,5 +502,7 @@ public:
 };
 
 } // namespace Passenger
+
+#endif /* __cplusplus */
 
 #endif /* _PASSENGER_EXCEPTIONS_H_ */

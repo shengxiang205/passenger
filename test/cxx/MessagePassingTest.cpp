@@ -11,7 +11,7 @@ namespace tut {
 		MessageBoxPtr box;
 
 		MessagePassingTest() {
-			box = make_shared<MessageBox>();
+			box = boost::make_shared<MessageBox>();
 		}
 
 		void sendMessagesLater() {
@@ -51,7 +51,7 @@ namespace tut {
 		unsigned long long timeout = 0;
 		Timer timer;
 		ensure_equals(box->recv("hi", &timeout), MessagePtr());
-		ensure(timer.elapsed() < 2);
+		ensure(timer.elapsed() < 10);
 		ensure_equals(timeout, 0ull);
 	}
 

@@ -39,8 +39,9 @@
 #include <cstring>
 #include <errno.h>
 #include <unistd.h>
-#include "StaticString.h"
-#include "Exceptions.h"
+#include <StaticString.h>
+#include <Exceptions.h>
+#include <Utils/LargeFiles.h>
 
 namespace Passenger {
 
@@ -72,23 +73,23 @@ typedef enum {
  * Convenience shortcut for creating a <tt>shared_ptr</tt>.
  * Instead of:
  * @code
- *    shared_ptr<Foo> foo;
+ *    boost::shared_ptr<Foo> foo;
  *    ...
- *    foo = shared_ptr<Foo>(new Foo());
+ *    foo = boost::shared_ptr<Foo>(new Foo());
  * @endcode
  * one can write:
  * @code
- *    shared_ptr<Foo> foo;
+ *    boost::shared_ptr<Foo> foo;
  *    ...
  *    foo = ptr(new Foo());
  * @endcode
  *
- * @param pointer The item to put in the shared_ptr object.
+ * @param pointer The item to put in the boost::shared_ptr object.
  * @ingroup Support
  */
-template<typename T> shared_ptr<T>
+template<typename T> boost::shared_ptr<T>
 ptr(T *pointer) {
-	return shared_ptr<T>(pointer);
+	return boost::shared_ptr<T>(pointer);
 }
 
 /**
@@ -109,7 +110,7 @@ bool fileExists(const StaticString &filename, CachedFileStat *cstat = 0,
 /**
  * Check whether 'filename' exists and what kind of file it is.
  *
- * @param filename The filename to check.
+ * @param filename The filename to check. It MUST be NULL-terminated.
  * @param mstat A CachedFileStat object, if you want to use cached statting.
  * @param throttleRate A throttle rate for cstat. Only applicable if cstat is not NULL.
  * @return The file type.
@@ -210,6 +211,20 @@ string escapeForXml(const string &input);
 string getProcessUsername();
 
 /**
+ * Returns either the group name for the given GID, or (if the group name
+ * couldn't be looked up) a string representation of the given GID.
+ */
+string getGroupName(gid_t gid);
+
+/**
+ * Given a `groupName` which is either the name of a group, or a string
+ * containing the GID of a group, looks up the GID as a gid_t.
+ *
+ * Returns `(gid_t) -1` if the lookup fails.
+ */
+gid_t lookupGid(const string &groupName);
+
+/**
  * Converts a mode string into a mode_t value.
  *
  * At this time only the symbolic mode strings are supported, e.g. something like looks
@@ -234,8 +249,10 @@ mode_t parseModeString(const StaticString &mode);
 /**
  * Turns the given path into an absolute path. Unlike realpath(), this function does
  * not resolve symlinks.
+ *
+ * @throws SystemException
  */
-string absolutizePath(const StaticString &path, const StaticString &workingDir = "");
+string absolutizePath(const StaticString &path, const StaticString &workingDir = StaticString());
 
 /**
  * Return the path name for the directory in which the system stores general
@@ -322,49 +339,8 @@ void makeDirTree(const string &path, const StaticString &mode = "u=rwx,g=,o=",
  */
 void removeDirTree(const string &path);
 
-/**
- * Check whether the specified directory is a valid Ruby on Rails
- * application root directory.
- *
- * @param cstat A CachedFileStat object, if you want to use cached statting.
- * @param throttleRate A throttle rate for cstat. Only applicable if cstat is not NULL.
- * @throws FileSystemException Unable to check because of a system error.
- * @throws TimeRetrievalException
- * @throws boost::thread_interrupted
- * @ingroup Support
- */
-bool verifyRailsDir(const string &dir, CachedFileStat *cstat = 0,
-                    unsigned int throttleRate = 0);
-
-/**
- * Check whether the specified directory is a valid Rack application
- * root directory.
- *
- * @param cstat A CachedFileStat object, if you want to use cached statting.
- * @param throttleRate A throttle rate for cstat. Only applicable if cstat is not NULL.
- * @throws FileSystemException Unable to check because of a filesystem error.
- * @throws TimeRetrievalException
- * @throws boost::thread_interrupted
- * @ingroup Support
- */
-bool verifyRackDir(const string &dir, CachedFileStat *cstat = 0,
-                   unsigned int throttleRate = 0);
-
-/**
- * Check whether the specified directory is a valid WSGI application
- * root directory.
- *
- * @param cstat A CachedFileStat object, if you want to use cached statting.
- * @param throttleRate A throttle rate for cstat. Only applicable if cstat is not NULL.
- * @throws FileSystemException Unable to check because of a filesystem error.
- * @throws TimeRetrievalException
- * @throws boost::thread_interrupted
- * @ingroup Support
- */
-bool verifyWSGIDir(const string &dir, CachedFileStat *cstat = 0,
-                   unsigned int throttleRate = 0);
-
-void prestartWebApps(const ResourceLocator &locator, const string &serializedprestartURLs);
+void prestartWebApps(const ResourceLocator &locator, const string &ruby,
+	const vector<string> &prestartURLs);
 
 /**
  * Runs the given function and catches any tracable_exceptions. Upon catching such an exception,
@@ -372,8 +348,8 @@ void prestartWebApps(const ResourceLocator &locator, const string &serializedpre
  * otherwise the exception is swallowed.
  * thread_interrupted and all other exceptions are silently propagated.
  */
-void runAndPrintExceptions(const function<void ()> &func, bool toAbort);
-void runAndPrintExceptions(const function<void ()> &func);
+void runAndPrintExceptions(const boost::function<void ()> &func, bool toAbort);
+void runAndPrintExceptions(const boost::function<void ()> &func);
 
 /**
  * Returns the system's host name.
@@ -410,6 +386,19 @@ void disableMallocDebugging();
 int runShellCommand(const StaticString &command);
 
 /**
+ * Async-signal safe way to fork().
+ *
+ * On Linux, the fork() glibc wrapper grabs a ptmalloc lock, so
+ * if malloc causes a segfault then we can't fork.
+ * http://sourceware.org/bugzilla/show_bug.cgi?id=4737
+ *
+ * OS X apparently does something similar, except they use a
+ * spinlock so it results in 100% CPU. See _cthread_fork_prepare()
+ * at http://www.opensource.apple.com/source/Libc/Libc-166/threads.subproj/cthreads.c
+ */
+pid_t asyncFork();
+
+/**
  * Close all file descriptors that are higher than <em>lastToKeepOpen</em>.
  * This function is async-signal safe. But make sure there are no other
  * threads running that might open file descriptors!
@@ -443,7 +432,7 @@ public:
 		
 		snprintf(templ, sizeof(templ), "%s/%s.XXXXXX", dir.c_str(), identifier);
 		templ[sizeof(templ) - 1] = '\0';
-		fd = mkstemp(templ);
+		fd = lfs_mkstemp(templ);
 		if (fd == -1) {
 			char message[1024];
 			int e = errno;

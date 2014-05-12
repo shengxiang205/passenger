@@ -13,11 +13,19 @@ We require contributors to sign our [contributor agreement](http://www.phusion.n
 
 Please submit patches in the form of a Github pull request or as a patch on the [bug tracker](http://code.google.com/p/phusion-passenger/issues/list). Pull requests are preferred and generally get more attention because Github has better email notifications and better discussion capabilities.
 
+You should also install required developer tools. The following command will install everything you need:
+
+    rake test:install_deps
+
+If your system requires gems to be installed with root privileges, run:
+
+    rake test:install_deps SUDO=1
+
 ## Contributing documentation
 
 All good software should have good documentation, and we take this very seriously. However writing and maintaing quality documentation is not an easy task. If you are not skilled in C++ or programming, then writing documentation is the easiest way to contribute.
 
-Most documentation can be located in the `doc` directory, and are either written in Markdown or in Asciidoc format. They can be compiled to HTML with `rake doc`. You need [Mizuho](https://github.com/FooBarWidget/mizuho) to compile Asciidoc and [BlueCloth](http://deveiate.org/projects/BlueCloth) to compile Markdown.
+Most documentation can be located in the `doc` directory, and are either written in Markdown or in Asciidoc format. They can be compiled to HTML with `rake doc`. You need [Mizuho](https://github.com/FooBarWidget/mizuho) to compile Asciidoc and [BlueCloth](http://deveiate.org/projects/BlueCloth) to compile Markdown. Both gems are automatically installed as part of the Phusion Passenger developer tools.
 
 ## Contributing by bug triaging
 
@@ -57,9 +65,11 @@ Run the following command to compile everything:
     rake apache2
     rake nginx
 
+It is recommended that you install ccache and set the `USE_CCACHE=1` environment variable. The build system will then automatically wrap all compiler calls in ccache, significantly improving recompilation times.
+
 ### Running the unit tests
 
-The tests depend on all the usual Phusion Passenger dependencies, plus a bunch of additional dependencies that you can install with:
+The tests depend on the Phusion Passenger developer tools. Make sure they're installed:
 
     rake test:install_deps
 
@@ -105,18 +115,23 @@ The most important directories are:
 
  * `lib/phusion_passenger` <br>
    The source code for Ruby parts of Phusion Passenger.
- * `ext/phusion_passenger` <br>
-   Native extensions for Ruby, used by the spawn server.
+ * `ext/ruby` <br>
+   Native extension for Ruby. Phusion Passenger uses the functions in this extension for optimizing certain operations, but Phusion Passenger can also function without this extension.
  * `ext/apache2` <br>
    Apache 2-specific source code.
  * `ext/nginx` <br>
    Nginx-specific source code.
  * `ext/common` <br>
    Source code shared by the Apache and Nginx modules.
+ * `ext/common/agents` <br>
+   Source code of the Phusion agent executables, i.e. PassengerWatchdog, PassengerHelperAgent and PassengerLoggingAgent.
+   * PassengerWatchdog is is the main Phusion Passenger control process, starts PassengerHelperAgent and PassengerLoggingAgent, and restarts them when they crash. It also cleans everything up upon shut down.
+   * PassengerHelperAgent performs most of the heavy lifting. It parses requests, spawns application processes, forwards requests to the correct process and forwards application responses back to the web server.
+   * PassengerLoggingAgent processes Union Station data and sends them to the Union Station server.
  * `bin` <br>
    User executables.
  * `helper-scripts` <br>
-   Scripts used during runtime, but not directly executed by the user.
+   Scripts used during runtime, but not directly executed by the user. All the loaders - applications which are responsible for loading an application written in a certain language and hooking it up to Phusion Passenger - are in this directory.
  * `doc` <br>
    Various documentation.
  * `test` <br>

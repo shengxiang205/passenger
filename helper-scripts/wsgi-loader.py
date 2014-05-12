@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010-2013 Phusion
+#  Copyright (c) 2010-2014 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -22,7 +22,7 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
-import sys, os, re, imp, traceback, socket, select, struct, logging, errno
+import sys, os, re, imp, threading, signal, traceback, socket, select, struct, logging, errno
 
 options = {}
 
@@ -68,6 +68,28 @@ def create_server_socket():
 	s.listen(1000)
 	return (filename, s)
 
+def install_signal_handlers():
+	def debug(sig, frame):
+		id2name = dict([(th.ident, th.name) for th in threading.enumerate()])
+		code = []
+		for thread_id, stack in sys._current_frames().items():
+			code.append("\n# Thread: %s(%d)" % (id2name.get(thread_id,""), thread_id))
+			for filename, lineno, name, line in traceback.extract_stack(stack):
+				code.append('  File: "%s", line %d, in %s' % (filename, lineno, name))
+				if line:
+					code.append("    %s" % (line.strip()))
+		print("\n".join(code))
+
+	def debug_and_exit(sig, frame):
+		debug(sig, frame)
+		sys.exit(1)
+
+	# Unfortunately, there's no way to install a signal handler that prints
+	# the backtrace without interrupting the current system call. os.siginterrupt()
+	# doesn't seem to work properly either. That is why we only have a SIGABRT
+	# handler and no SIGQUIT handler.
+	signal.signal(signal.SIGABRT, debug_and_exit)
+
 def advertise_sockets(socket_filename):
 	print("!> socket: main;unix:%s;session;1" % socket_filename)
 	print("!> ")
@@ -106,6 +128,7 @@ class RequestHandler:
 				if not client:
 					done = True
 					break
+				socket_hijacked = False
 				try:
 					try:
 						env, input_stream = self.parse_request(client)
@@ -113,7 +136,7 @@ class RequestHandler:
 							if env['REQUEST_METHOD'] == 'ping':
 								self.process_ping(env, input_stream, client)
 							else:
-								self.process_request(env, input_stream, client)
+								socket_hijacked = self.process_request(env, input_stream, client)
 					except KeyboardInterrupt:
 						done = True
 					except IOError:
@@ -123,10 +146,17 @@ class RequestHandler:
 					except Exception:
 						logging.exception("WSGI application raised an exception!")
 				finally:
-					try:
-						client.close()
-					except:
-						pass
+					if not socket_hijacked:
+						try:
+							# Shutdown the socket like this just in case the app
+							# spawned a child process that keeps it open.
+							client.shutdown(socket.SHUT_WR)
+						except:
+							pass
+						try:
+							client.close()
+						except:
+							pass
 		except KeyboardInterrupt:
 			pass
 
@@ -165,10 +195,10 @@ class RequestHandler:
 	
 	if hasattr(socket, '_fileobject'):
 		def wrap_input_socket(self, sock):
-			return socket._fileobject(sock, 'r', 512)
+			return socket._fileobject(sock, 'rb', 512)
 	else:
 		def wrap_input_socket(self, sock):
-			return socket.socket.makefile(sock, 'r', 512)
+			return socket.socket.makefile(sock, 'rb', 512)
 
 	def process_request(self, env, input_stream, output_stream):
 		# The WSGI speculation says that the input parameter object passed needs to
@@ -183,7 +213,7 @@ class RequestHandler:
 		env['wsgi.version']      = (1, 0)
 		env['wsgi.multithread']  = False
 		env['wsgi.multiprocess'] = True
-		env['wsgi.run_once']	 = True
+		env['wsgi.run_once']	 = False
 		if env.get('HTTPS','off') in ('on', '1', 'true', 'yes'):
 			env['wsgi.url_scheme'] = 'https'
 		else:
@@ -226,7 +256,16 @@ class RequestHandler:
 			headers_set[:] = [status, response_headers]
 			return write
 		
+		def hijack():
+			env['passenger.hijacked_socket'] = output_stream
+			return output_stream
+
+		env['passenger.hijack'] = hijack
+
 		result = self.app(env, start_response)
+		if 'passenger.hijacked_socket' in env:
+			# Socket connection hijacked. Don't do anything.
+			return True
 		try:
 			for data in result:
 				# Don't send headers until body appears.
@@ -238,6 +277,7 @@ class RequestHandler:
 		finally:
 			if hasattr(result, 'close'):
 				result.close()
+		return False
 	
 	def process_ping(self, env, input_stream, output_stream):
 		output_stream.sendall(b"pong")
@@ -252,6 +292,7 @@ if __name__ == "__main__":
 	handshake_and_read_startup_request()
 	app_module = load_app()
 	socket_filename, server_socket = create_server_socket()
+	install_signal_handlers()
 	handler = RequestHandler(server_socket, sys.stdin, app_module.application)
 	print("!> Ready")
 	advertise_sockets(socket_filename)

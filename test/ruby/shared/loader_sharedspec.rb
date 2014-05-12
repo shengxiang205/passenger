@@ -1,6 +1,6 @@
 require 'socket'
-require 'phusion_passenger/utils'
-require 'phusion_passenger/message_channel'
+PhusionPassenger.require_passenger_lib 'utils'
+PhusionPassenger.require_passenger_lib 'message_channel'
 
 module PhusionPassenger
 
@@ -37,6 +37,10 @@ class Loader
 	end
 
 	def close
+		@input.close_write
+		# Wait at most 100 msec for process to exit.
+		select([@output], nil, nil, 0.1)
+
 		@input.close if !@input.closed?
 		@output.close if !@output.closed?
 		if @pid
@@ -121,6 +125,7 @@ private
 
 		if status == "Error\n"
 			body = @output.read
+			STDERR.puts "<--- #{body}" if DEBUG
 		end
 
 		return { :status => status.strip, :headers => headers, :body => body }
@@ -229,12 +234,12 @@ shared_examples_for "a loader" do
 		result[:status].should == "Ready"
 		headers, body = perform_request(
 			"REQUEST_METHOD" => "GET",
-			"PATH_INFO" => "/hello",
+			"PATH_INFO" => "/",
 			# For Rails 2
-			"REQUEST_URI" => "/hello"
+			"REQUEST_URI" => "/"
 		)
 		headers["Status"].should == "200"
-		body.should == "hello world"
+		body.should == "front page"
 	end
 end
 

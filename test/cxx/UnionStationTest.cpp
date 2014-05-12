@@ -31,7 +31,7 @@ namespace tut {
 		ev::dynamic_loop eventLoop;
 		FileDescriptor serverFd;
 		LoggingServerPtr server;
-		shared_ptr<oxt::thread> serverThread;
+		boost::shared_ptr<oxt::thread> serverThread;
 		LoggerFactoryPtr factory, factory2, factory3, factory4;
 		
 		UnionStationTest() {
@@ -60,10 +60,12 @@ namespace tut {
 			setLogLevel(0);
 		}
 		
-		void startLoggingServer(const function<void ()> &initFunc = function<void ()>()) {
+		void startLoggingServer(const boost::function<void ()> &initFunc = boost::function<void ()>()) {
+			VariantMap options;
+			options.set("analytics_dump_file", dumpFile);
 			serverFd = createUnixServer(socketFilename.c_str());
 			server = ptr(new LoggingServer(eventLoop,
-				serverFd, accountsDatabase, dumpFile));
+				serverFd, accountsDatabase, options));
 			if (initFunc) {
 				initFunc();
 			}
@@ -338,11 +340,11 @@ namespace tut {
 		
 		client1.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "true", "true", NULL);
+			"-", "true", "true", NULL);
 		client1.read(args);
 		client2.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "true", NULL);
+			"-", "true", NULL);
 		client2.write("log", TODAY_TXN_ID, "1000", NULL);
 		client2.writeScalar("hello world");
 		client2.write("flush", NULL);
@@ -374,11 +376,11 @@ namespace tut {
 		
 		client1.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "false", "true", NULL);
+			"-", "false", "true", NULL);
 		client1.read(args);
 		client2.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "false", NULL);
+			"-", "false", NULL);
 		client2.write("flush", NULL);
 		client2.read(args);
 		client2.disconnect();
@@ -401,11 +403,11 @@ namespace tut {
 		
 		client1.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "true", "true", NULL);
+			"-", "true", "true", NULL);
 		client1.read(args);
 		client2.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "true", NULL);
+			"-", "true", NULL);
 		client2.write("flush", NULL);
 		client2.read(args);
 		
@@ -426,11 +428,11 @@ namespace tut {
 		
 		client1.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "false", "true", NULL);
+			"-", "false", "true", NULL);
 		client1.read(args);
 		client2.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "", "requests", TODAY_TIMESTAMP_STR,
-			"", "false", NULL);
+			"-", "false", NULL);
 		client2.write("flush", NULL);
 		client2.read(args);
 		
@@ -702,7 +704,7 @@ namespace tut {
 		
 		client1.write("openTransaction",
 			TODAY_TXN_ID, "foobar", "remote", "requests", TODAY_TIMESTAMP_STR,
-			"", "true", NULL);
+			"-", "true", NULL);
 		client1.write("closeTransaction", TODAY_TXN_ID, TODAY_TIMESTAMP_STR, NULL);
 		client1.write("flush", NULL);
 		client1.read(args);
@@ -716,7 +718,7 @@ namespace tut {
 		// Test logging of new transaction.
 		SystemTime::forceAll(YESTERDAY);
 		
-		LoggerPtr log = factory->newTransaction("foobar", "requests", "",
+		LoggerPtr log = factory->newTransaction("foobar", "requests", "-",
 			"uri == \"/foo\""
 			"\1"
 			"uri != \"/bar\"");
@@ -725,7 +727,7 @@ namespace tut {
 		log->flushToDiskAfterClose(true);
 		log.reset();
 		
-		log = factory->newTransaction("foobar", "requests", "",
+		log = factory->newTransaction("foobar", "requests", "-",
 			"uri == \"/foo\""
 			"\1"
 			"uri == \"/bar\"");

@@ -25,6 +25,17 @@
 #ifndef _PASSENGER_APPLICATION_POOL2_APP_TYPES_H_
 #define _PASSENGER_APPLICATION_POOL2_APP_TYPES_H_
 
+/**
+ * Application type registry
+ *
+ * All supported application types (e.g. Rack, classic Rails, WSGI, etc)
+ * are registered here. The AppTypeDetector is responsible for checking
+ * what kind of application lives under the given directory.
+ */
+
+#include "../Exceptions.h"
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
@@ -33,19 +44,24 @@ typedef enum {
 	PAT_RACK,
 	PAT_WSGI,
 	PAT_CLASSIC_RAILS,
-	PAT_NONE
+	PAT_NODE,
+	PAT_METEOR,
+	PAT_NONE,
+	PAT_ERROR
 } PassengerAppType;
 
-typedef void PassengerAppTypeDetector;
+typedef void PP_AppTypeDetector;
 
-PassengerAppTypeDetector *passenger_app_type_detector_new();
-void passenger_app_type_detector_free(PassengerAppTypeDetector *detector);
-PassengerAppType passenger_app_type_detector_check_document_root(PassengerAppTypeDetector *detector,
-	const char *documentRoot, unsigned int len, int resolveFirstSymlink);
-PassengerAppType passenger_app_type_detector_check_app_root(PassengerAppTypeDetector *detector,
-	const char *appRoot, unsigned int len);
+PP_AppTypeDetector *pp_app_type_detector_new();
+void pp_app_type_detector_free(PP_AppTypeDetector *detector);
+PassengerAppType pp_app_type_detector_check_document_root(PP_AppTypeDetector *detector,
+	const char *documentRoot, unsigned int len, int resolveFirstSymlink,
+	PP_Error *error);
+PassengerAppType pp_app_type_detector_check_app_root(PP_AppTypeDetector *detector,
+	const char *appRoot, unsigned int len, PP_Error *error);
 
-const char *passenger_get_app_type_name(PassengerAppType type);
+const char *pp_get_app_type_name(PassengerAppType type);
+PassengerAppType pp_get_app_type2(const char *name, unsigned int len);
 
 #ifdef __cplusplus
 }
@@ -56,6 +72,8 @@ const char *passenger_get_app_type_name(PassengerAppType type);
 #include <oxt/macros.hpp>
 #include <oxt/backtrace.hpp>
 #include <cstdlib>
+#include <limits.h>
+#include <string>
 #include <Logging.h>
 #include <StaticString.h>
 #include <Utils.h>
@@ -64,6 +82,8 @@ const char *passenger_get_app_type_name(PassengerAppType type);
 
 namespace Passenger {
 namespace ApplicationPool2 {
+
+using namespace std;
 
 
 struct AppTypeDefinition {
@@ -89,10 +109,9 @@ private:
 		pos = appendData(pos, end, name);
 		if (OXT_UNLIKELY(pos == end)) {
 			TRACE_POINT();
-			P_CRITICAL("BUG: buffer overflow");
-			abort();
+			throw RuntimeException("Not enough buffer space");
 		}
-		return fileExists(StaticString(buf, pos - buf), cstat, throttleRate);
+		return getFileType(StaticString(buf, pos - buf), cstat, throttleRate) != FT_NONEXISTANT;
 	}
 
 public:
@@ -114,21 +133,66 @@ public:
 		}
 	}
 
-	PassengerAppType checkDocumentRoot(const StaticString &documentRoot, bool resolveFirstSymlink = false) {
+	/**
+	 * Given a web server document root (that is, some subdirectory under the
+	 * application root, e.g. "/webapps/foobar/public"), returns the type of
+	 * application that lives there. Returns PAT_NONE if it wasn't able to detect
+	 * a supported application type.
+	 *
+	 * If `resolveFirstSymlink` is given, and `documentRoot` is a symlink, then
+	 * this function will check the parent directory
+	 * of the directory that the symlink points to (i.e. `resolve(documentRoot) + "/.."`),
+	 * instead of checking the directory that the symlink is located in (i.e.
+	 * `dirname(documentRoot)`).
+	 *
+	 * If `appRoot` is non-NULL, then the inferred application root will be stored here.
+	 *
+	 * @throws FileSystemException Unable to check because of a filesystem error.
+	 * @throws TimeRetrievalException
+	 * @throws boost::thread_interrupted
+	 */
+	PassengerAppType checkDocumentRoot(const StaticString &documentRoot,
+		bool resolveFirstSymlink = false,
+		string *appRoot = NULL)
+	{
 		if (!resolveFirstSymlink) {
-			return checkAppRoot(extractDirNameStatic(documentRoot));
+			if (appRoot != NULL) {
+				*appRoot = extractDirNameStatic(documentRoot);
+				return checkAppRoot(*appRoot);
+			} else {
+				return checkAppRoot(extractDirNameStatic(documentRoot));
+			}
 		} else {
-			char ntDocRoot[documentRoot.size() + 1];
+			if (OXT_UNLIKELY(documentRoot.size() > PATH_MAX)) {
+				TRACE_POINT();
+				throw RuntimeException("Not enough buffer space");
+			}
+
+			char ntDocRoot[PATH_MAX + 1];
 			memcpy(ntDocRoot, documentRoot.data(), documentRoot.size());
 			ntDocRoot[documentRoot.size()] = '\0';
 			string resolvedDocumentRoot = resolveSymlink(ntDocRoot);
-			return checkAppRoot(extractDirNameStatic(resolvedDocumentRoot));
+			if (appRoot != NULL) {
+				*appRoot = extractDirNameStatic(resolvedDocumentRoot);
+				return checkAppRoot(*appRoot);
+			} else {
+				return checkAppRoot(extractDirNameStatic(resolvedDocumentRoot));
+			}
 		}
 	}
 
+	/**
+	 * Returns the type of application that lives under the application
+	 * directory `appRoot`. Returns PAT_NONE if it wasn't able to detect
+	 * a supported application type.
+	 *
+	 * @throws FileSystemException Unable to check because of a filesystem error.
+	 * @throws TimeRetrievalException
+	 * @throws boost::thread_interrupted
+	 */
 	PassengerAppType checkAppRoot(const StaticString &appRoot) {
-		char buf[appRoot.size() + 32];
-		const char *end = buf + appRoot.size() + 32;
+		char buf[PATH_MAX + 32];
+		const char *end = buf + sizeof(buf) - 1;
 		const AppTypeDefinition *definition = &appTypeDefinitions[0];
 
 		while (definition->type != PAT_NONE) {

@@ -1,8 +1,8 @@
 require File.expand_path(File.dirname(__FILE__) + '/../../spec_helper')
 require 'socket'
 require 'fileutils'
-require 'phusion_passenger/analytics_logger'
-require 'phusion_passenger/utils/tmpdir'
+PhusionPassenger.require_passenger_lib 'analytics_logger'
+PhusionPassenger.require_passenger_lib 'utils/tmpdir'
 
 module PhusionPassenger
 
@@ -160,6 +160,28 @@ shared_examples_for "analytics logging extensions for Rails" do
 		start!(@options.merge("active_record" => true))
 		send_request_to_app("PATH_INFO" => "/foo")
 		extra_info_regex = Regexp.escape(base64("SQL\nCREATE TABLE foobar (id INT)"))
+		eventually(5) do
+			flush_logging_agent(@logging_agent_password, @socket_address)
+			log = read_log
+			log =~ /BEGIN: DB BENCHMARK: .* \(.*\) #{extra_info_regex}$/ &&
+				log =~ /END: DB BENCHMARK: .* \(.*\)$/
+		end
+	end
+
+	it "applies event preprocessor to log events" do
+		File.write("#{@stub.app_root}/app/controllers/foo_controller.rb", %Q{
+			class FooController < ActionController::Base
+				def index
+					db = ActiveRecord::Base.connection
+					db.execute("CREATE TABLE foobar (id INT)--secret")
+					db.execute("INSERT INTO foobar VALUES (1)")
+					render :nothing => true
+				end
+			end
+		})
+		start!(@options.merge("active_record" => true))
+		send_request_to_app("PATH_INFO" => "/foo")
+		extra_info_regex = Regexp.escape(base64("SQL\nCREATE TABLE foobar (id INT)--PASSWORD"))
 		eventually(5) do
 			flush_logging_agent(@logging_agent_password, @socket_address)
 			log = read_log

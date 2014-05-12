@@ -22,6 +22,7 @@
 
 	#define RUN_USER_SWITCHING_TEST() \
 		process = spawner->spawn(options); \
+		process->requiresShutdown = false; \
 		BufferedIO io(FileDescriptor(open("/tmp/info.txt", O_RDONLY))); \
 		uid_t uid = (uid_t) atol(io.readLine().c_str()); \
 		gid_t gid = (gid_t) atol(io.readLine().c_str()); \
@@ -29,7 +30,7 @@
 		/* Avoid compiler warning. */ \
 		(void) uid; (void) gid; (void) groups
 
-	typedef shared_ptr<Spawner> SpawnerPtr;
+	typedef boost::shared_ptr<Spawner> SpawnerPtr;
 	
 	static void addUserSwitchingCode() {
 		FILE *f = fopen("tmp.wsgi/passenger_wsgi.py", "a");
@@ -73,24 +74,15 @@
 		return getgrgid(gid)->gr_name;
 	}
 
-	static string strip(const string &str) {
-		if (!str.empty() && str[str.size() - 1] == '\n') {
-			string result = str;
-			result.erase(str.size() - 1,  1);
-			return result;
-		} else {
-			return str;
-		}
-	}
-
 	TEST_METHOD(1) {
 		// Basic spawning test.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		SpawnerPtr spawner = createSpawner(options);
 		process = spawner->spawn(options);
+		process->requiresShutdown = false;
 		ensure_equals(process->sockets->size(), 1u);
 		
 		Connection conn = process->sockets->front().checkoutConnection();
@@ -103,12 +95,13 @@
 		// It enforces the given start timeout.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "sleep\1" "60";
+		options.startCommand = "sleep\t" "60";
 		options.startupFile  = ".";
 		options.startTimeout = 300;
 		SpawnerPtr spawner = createSpawner(options);
 		try {
-			spawner->spawn(options);
+			process = spawner->spawn(options);
+			process->requiresShutdown = false;
 			fail("Timeout expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
@@ -121,11 +114,12 @@
 		// in exceptions.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "echo\1" "!> hello world";
+		options.startCommand = "echo\t" "!> hello world";
 		options.startupFile  = ".";
 		SpawnerPtr spawner = createSpawner(options);
 		try {
-			spawner->spawn(options);
+			process = spawner->spawn(options);
+			process->requiresShutdown = false;
 			fail("Exception expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
@@ -138,11 +132,12 @@
 		// which will result in a SpawnException with the content.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "perl\1" "start_error.pl";
+		options.startCommand = "perl\t" "start_error.pl";
 		options.startupFile  = "start_error.pl";
 		SpawnerPtr spawner = createSpawner(options);
 		try {
-			spawner->spawn(options);
+			process = spawner->spawn(options);
+			process->requiresShutdown = false;
 			fail("SpawnException expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
@@ -158,12 +153,13 @@
 		// response.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "perl\1" "start_error.pl\1" "freeze";
+		options.startCommand = "perl\t" "start_error.pl\t" "freeze";
 		options.startupFile  = "start_error.pl";
 		options.startTimeout = 300;
 		SpawnerPtr spawner = createSpawner(options);
 		try {
-			spawner->spawn(options);
+			process = spawner->spawn(options);
+			process->requiresShutdown = false;
 			fail("Timeout expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
@@ -175,10 +171,11 @@
 		// The reported PID is correct.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		SpawnerPtr spawner = createSpawner(options);
 		process = spawner->spawn(options);
+		process->requiresShutdown = false;
 		ensure_equals(process->sockets->size(), 1u);
 		
 		Connection conn = process->sockets->front().checkoutConnection();
@@ -191,12 +188,13 @@
 		// Custom environment variables can be passed.
 		Options options = createOptions();
 		options.appRoot = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		options.environmentVariables.push_back(make_pair("PASSENGER_FOO", "foo"));
 		options.environmentVariables.push_back(make_pair("PASSENGER_BAR", "bar"));
 		SpawnerPtr spawner = createSpawner(options);
 		process = spawner->spawn(options);
+		process->requiresShutdown = false;
 		ensure_equals(process->sockets->size(), 1u);
 		
 		Connection conn = process->sockets->front().checkoutConnection();
@@ -211,12 +209,13 @@
 		// Any raised SpawnExceptions take note of the process's environment variables.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "echo\1" "!> hello world";
+		options.startCommand = "echo\t" "!> hello world";
 		options.startupFile  = ".";
 		options.environmentVariables.push_back(make_pair("PASSENGER_FOO", "foo"));
 		SpawnerPtr spawner = createSpawner(options);
 		try {
-			spawner->spawn(options);
+			process = spawner->spawn(options);
+			process->requiresShutdown = false;
 			fail("Exception expected");
 		} catch (const SpawnException &e) {
 			ensure(containsSubstring(e["envvars"], "PASSENGER_FOO=foo\n"));
@@ -246,6 +245,7 @@
 
 			try {
 				process = spawner->spawn(options);
+				process->requiresShutdown = false;
 				fail("SpawnException expected");
 			} catch (const SpawnException &e) {
 				ensure("(1)", containsSubstring(e.getErrorPage(),
@@ -255,6 +255,7 @@
 			runShellCommand("chmod 700 tmp.check/a");
 			try {
 				process = spawner->spawn(options);
+				process->requiresShutdown = false;
 				fail("SpawnException expected");
 			} catch (const SpawnException &e) {
 				ensure("(2)", containsSubstring(e.getErrorPage(),
@@ -264,6 +265,7 @@
 			runShellCommand("chmod 700 tmp.check/a/b/c");
 			try {
 				process = spawner->spawn(options);
+				process->requiresShutdown = false;
 				fail("SpawnException expected");
 			} catch (const SpawnException &e) {
 				ensure("(3)", containsSubstring(e.getErrorPage(),
@@ -272,6 +274,7 @@
 
 			runShellCommand("chmod 700 tmp.check/a/b/c/d");
 			process = spawner->spawn(options); // Should not throw.
+			process->requiresShutdown = false;
 		}
 	}
 
@@ -309,10 +312,44 @@
 		process.reset();
 
 		EVENTUALLY(2,
-			lock_guard<boost::mutex> l(gatheredOutputSyncher);
+			boost::lock_guard<boost::mutex> l(gatheredOutputSyncher);
 			result = gatheredOutput.find("hello stdout!\n") != string::npos
 				&& gatheredOutput.find("hello stderr!\n") != string::npos;
 		);
+	}
+
+	TEST_METHOD(11) {
+		// It infers the code revision from the REVISION file.
+		TempDirCopy dir("stub/rack", "tmp.rack");
+		createFile("tmp.rack/REVISION", "hello\n");
+
+		Options options = createOptions();
+		options.appRoot      = "tmp.rack";
+		options.startCommand = "ruby\t" "start.rb";
+		options.startupFile  = "start.rb";
+		SpawnerPtr spawner = createSpawner(options);
+		process = spawner->spawn(options);
+		process->requiresShutdown = false;
+		
+		ensure_equals(process->codeRevision, "hello");
+	}
+
+	TEST_METHOD(12) {
+		// It infers the code revision from the app root symlink,
+		// if the app root is called "current".
+		TempDir dir1("tmp.rack");
+		TempDirCopy dir2("stub/rack", "tmp.rack/today");
+		symlink("today", "tmp.rack/current");
+
+		Options options = createOptions();
+		options.appRoot      = "tmp.rack/current";
+		options.startCommand = "ruby\t" "start.rb";
+		options.startupFile  = "start.rb";
+		SpawnerPtr spawner = createSpawner(options);
+		process = spawner->spawn(options);
+		process->requiresShutdown = false;
+		
+		ensure_equals(process->codeRevision, "today");
 	}
 	
 	// It raises an exception if getStartupCommand() is empty.

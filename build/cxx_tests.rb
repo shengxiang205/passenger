@@ -24,17 +24,19 @@
 ### C++ components tests ###
 
 TEST_CXX_CFLAGS = "-Iext -Iext/common " <<
+	"#{EXTRA_PRE_CXXFLAGS} " <<
 	"#{LIBEV_CFLAGS} #{LIBEIO_CFLAGS} #{PlatformInfo.curl_flags} -Itest/cxx -Itest/support " <<
 	"#{TEST_COMMON_CFLAGS}"
-TEST_CXX_CFLAGS << " -faddress-sanitizer" if USE_ASAN
-TEST_CXX_LDFLAGS = "#{TEST_COMMON_LIBRARY.link_objects_as_string} " <<
+TEST_CXX_CFLAGS << " #{PlatformInfo.adress_sanitizer_flag}" if USE_ASAN
+TEST_CXX_LDFLAGS = "#{EXTRA_PRE_CXX_LDFLAGS} " <<
+	"#{TEST_COMMON_LIBRARY.link_objects_as_string} " <<
 	"#{TEST_BOOST_OXT_LIBRARY} #{LIBEV_LIBS} #{LIBEIO_LIBS} " <<
 	"#{PlatformInfo.curl_libs} " <<
 	"#{PlatformInfo.zlib_libs} " <<
-	"#{PlatformInfo.portability_ldflags}"
+	"#{PlatformInfo.portability_cxx_ldflags}"
 TEST_CXX_LDFLAGS << " #{PlatformInfo.dmalloc_ldflags}" if USE_DMALLOC
-TEST_CXX_LDFLAGS << " -faddress-sanitizer" if USE_ASAN
-TEST_CXX_LDFLAGS << " #{EXTRA_LDFLAGS}"
+TEST_CXX_LDFLAGS << " #{PlatformInfo.adress_sanitizer_flag}" if USE_ASAN
+TEST_CXX_LDFLAGS << " #{EXTRA_CXX_LDFLAGS}"
 TEST_CXX_LDFLAGS.strip!
 TEST_CXX_OBJECTS = {
 	'test/cxx/CxxTestMain.o' => %w(
@@ -123,6 +125,9 @@ TEST_CXX_OBJECTS = {
 	'test/cxx/EventedClientTest.o' => %w(
 		test/cxx/EventedClientTest.cpp
 		ext/common/EventedClient.h),
+	'test/cxx/EventedBufferedInput.o' => %w(
+		test/cxx/EventedBufferedInputTest.cpp
+		ext/common/EventedBufferedInput.h),
 	'test/cxx/MessageServerTest.o' => %w(
 		test/cxx/MessageServerTest.cpp
 		ext/common/Logging.h
@@ -208,6 +213,7 @@ dependencies = [
 	'test/support/allocate_memory',
 	NATIVE_SUPPORT_TARGET,
 	AGENT_OUTPUT_DIR + 'SpawnPreparer',
+	AGENT_OUTPUT_DIR + 'TempDirToucher',
 	AGENT_OUTPUT_DIR + 'EnvPrinter'
 ].compact
 desc "Run unit tests for the Apache 2 and Nginx C++ components"
@@ -220,15 +226,20 @@ task 'test:cxx' => dependencies do
 		command = "valgrind --dsymutil=yes --db-attach=yes --child-silent-after-fork=yes #{command}"
 	end
 	if boolean_option('SUDO')
-		command = "sudo #{command}"
+		command = "#{PlatformInfo.ruby_sudo_command} #{command}"
 	end
 	if boolean_option('REPEAT')
 		if boolean_option('GDB')
 			abort "You cannot set both REPEAT=1 and GDB=1."
 		end
 		sh "cd test && while #{command}; do echo -------------------------------------------; done"
+	elsif boolean_option('REPEAT_FOREVER')
+		if boolean_option('GDB')
+			abort "You cannot set both REPEAT_FOREVER=1 and GDB=1."
+		end
+		sh "cd test && while true; do #{command}; echo -------------------------------------------; done"
 	else
-		sh "cd test && #{command}"
+		sh "cd test && exec #{command}"
 	end
 end
 
@@ -238,6 +249,7 @@ dependencies = [
 	LIBEIO_TARGET,
 	TEST_BOOST_OXT_LIBRARY,
 	TEST_COMMON_LIBRARY.link_objects,
+	'ext/common/Constants.h',
 	'ext/common/MultiLibeio.cpp'
 ].flatten.compact
 file 'test/cxx/CxxTestMain' => dependencies.flatten do
@@ -250,6 +262,7 @@ deps = [
 	'test/tut/tut.h',
 	'ext/oxt/thread.hpp',
 	'ext/oxt/tracable_exception.hpp',
+	'ext/common/Constants.h',
 	'ext/common/ServerInstanceDir.h',
 	'ext/common/Exceptions.h',
 	'ext/common/Utils.h',
@@ -260,7 +273,8 @@ file 'test/cxx/TestSupport.h.gch' => deps do
 end
 
 TEST_CXX_OBJECTS.each_pair do |target, sources|
-	file(target => sources + ['test/cxx/TestSupport.h', 'test/cxx/TestSupport.h.gch']) do
+	extra_deps = ['test/cxx/TestSupport.h', 'test/cxx/TestSupport.h.gch', 'ext/common/Constants.h']
+	file(target => sources + extra_deps) do
 		# To use precompiled headers in Clang, we must -include them on them command line.
 		compile_cxx sources[0], "-o #{target} -include test/cxx/TestSupport.h #{TEST_CXX_CFLAGS}"
 	end

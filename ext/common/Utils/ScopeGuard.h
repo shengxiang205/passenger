@@ -27,11 +27,14 @@
 
 #include <boost/noncopyable.hpp>
 #include <boost/function.hpp>
+#include <boost/thread.hpp>
+#include <oxt/system_calls.hpp>
 #include <cstdio>
 
 namespace Passenger {
 
 using namespace boost;
+using namespace oxt;
 
 
 #ifndef _PASSENGER_SAFELY_CLOSE_DEFINED_
@@ -47,29 +50,43 @@ using namespace boost;
  */
 class ScopeGuard: public noncopyable {
 private:
-	function<void ()> func;
+	boost::function<void ()> func;
+	bool interruptable;
 	
 public:
 	ScopeGuard() { }
 	
-	ScopeGuard(const function<void ()> &func) {
+	ScopeGuard(const boost::function<void ()> &func, bool interruptable = false) {
 		this->func = func;
+		this->interruptable = interruptable;
 	}
 	
 	~ScopeGuard() {
 		if (func) {
-			func();
+			if (interruptable) {
+				func();
+			} else {
+				this_thread::disable_interruption di;
+				this_thread::disable_syscall_interruption dsi;
+				func();
+			}
 		}
 	}
 	
 	void clear() {
-		func = function<void()>();
+		func = boost::function<void()>();
 	}
 	
 	void runNow() {
-		function<void ()> oldFunc = func;
-		func = function<void()>();
-		oldFunc();
+		boost::function<void ()> oldFunc = func;
+		func = boost::function<void()>();
+		if (interruptable) {
+			oldFunc();
+		} else {
+			this_thread::disable_interruption di;
+			this_thread::disable_syscall_interruption dsi;
+			oldFunc();
+		}
 	}
 };
 

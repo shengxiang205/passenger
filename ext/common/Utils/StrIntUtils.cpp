@@ -122,6 +122,28 @@ replaceString(const string &str, const string &toFind, const string &replaceWith
 }
 
 string
+replaceAll(const string &str, const string &toFind, const string &replaceWith) {
+	string result = str;
+	while (result.find(toFind) != string::npos) {
+		result = replaceString(result, toFind, replaceWith);
+	}
+	return result;
+}
+
+string
+strip(const StaticString &str) {
+	const char *data = str.data();
+	const char *end = str.data() + str.size();
+	while (data < end && (*data == ' ' || *data == '\n' || *data == '\t')) {
+		data++;
+	}
+	while (end > data && (end[-1] == ' ' || end[-1] == '\n' || end[-1] == '\t')) {
+		end--;
+	}
+	return string(data, end - data);
+}
+
+string
 toString(const vector<string> &vec) {
 	vector<StaticString> vec2;
 	vec2.reserve(vec.size());
@@ -352,6 +374,22 @@ integerToHexatri(long long value) {
 	return string(buf);
 }
 
+bool
+looksLikePositiveNumber(const StaticString &str) {
+	if (str.empty()) {
+		return false;
+	} else {
+		bool result = true;
+		const char *data = str.data();
+		const char *end = str.data() + str.size();
+		while (result && data != end) {
+			result = result && (*data >= '0' && *data <= '9');
+			data++;
+		}
+		return result;
+	}
+}
+
 int
 atoi(const string &s) {
 	return ::atoi(s.c_str());
@@ -474,7 +512,7 @@ cEscapeString(const StaticString &input) {
 string
 escapeHTML(const StaticString &input) {
 	string result;
-	result.reserve((int) round(input.size() * 1.25));
+	result.reserve((int) ceil(input.size() * 1.25));
 	
 	const char *current = (const char *) input.c_str();
 	const char *end     = current + input.size();

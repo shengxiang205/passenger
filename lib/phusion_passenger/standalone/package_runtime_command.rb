@@ -1,3 +1,4 @@
+# encoding: utf-8
 #  Phusion Passenger - https://www.phusionpassenger.com/
 #  Copyright (c) 2010 Phusion
 #
@@ -20,7 +21,6 @@
 #  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
-require 'phusion_passenger/standalone/command'
 
 module PhusionPassenger
 module Standalone
@@ -29,9 +29,13 @@ class PackageRuntimeCommand < Command
 	def self.description
 		return "Package the Phusion Passenger Standalone runtime."
 	end
-	
+
+	def self.require_libs
+		PhusionPassenger.require_passenger_lib 'platform_info/binary_compatibility'
+		PhusionPassenger.require_passenger_lib 'standalone/runtime_installer'
+	end
+
 	def run
-		require_platform_info_binary_compatibility
 		destdir = File.expand_path("passenger-standalone")
 		description =
 			"Package the Phusion Passenger Standalone runtime into the specified directory.\n" <<
@@ -42,7 +46,8 @@ class PackageRuntimeCommand < Command
 				@options[:nginx_version] = value
 			end
 			opts.on("--nginx-tarball FILENAME", String,
-				wrap_desc("Use the given tarball instead of downloading from the Internet")) do |value|
+				wrap_desc("Use the given tarball instead of downloading from the Internet. " +
+					"This tarball *must* match the version specified by --nginx-version!")) do |value|
 				@options[:nginx_tarball] = value
 			end
 		end
@@ -56,7 +61,6 @@ class PackageRuntimeCommand < Command
 		sh "rm", "-rf", support_dir
 		sh "rm", "-rf", nginx_dir
 		
-		require 'phusion_passenger/standalone/runtime_installer'
 		installer = RuntimeInstaller.new(
 			:targets     => [:nginx, :ruby, :support_binaries],
 			:support_dir => support_dir,

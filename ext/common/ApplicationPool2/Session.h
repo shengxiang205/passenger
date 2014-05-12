@@ -108,8 +108,10 @@ public:
 	const string &getConnectPassword() const;
 	pid_t getPid() const;
 	const string &getGupid() const;
+	int getStickySessionId() const;
 	const GroupPtr getGroup() const;
 	void requestOOBW();
+	int kill(int signo);
 	
 	bool isClosed() const {
 		return closed;
@@ -162,7 +164,7 @@ public:
 	}
 };
 
-typedef shared_ptr<Session> SessionPtr;
+typedef boost::shared_ptr<Session> SessionPtr;
 
 
 } // namespace ApplicationPool2

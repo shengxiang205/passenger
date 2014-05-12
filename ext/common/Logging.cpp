@@ -27,12 +27,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <Logging.h>
+#include <StaticString.h>
 #include <Utils/StrIntUtils.h>
+#include <Utils/IOUtils.h>
 
 namespace Passenger {
 
 int _logLevel = 0;
 int _logOutput = STDERR_FILENO;
+static bool printAppOutputAsDebuggingMessages = false;
 
 int
 getLogLevel() {
@@ -77,23 +80,90 @@ _prepareLogEntry(std::stringstream &sstream, const char *file, unsigned int line
 	strftime(datetime_buf, sizeof(datetime_buf) - 1, "%F %H:%M:%S", &the_tm);
 	gettimeofday(&tv, NULL);
 	sstream <<
-		"[ " << std::dec << getpid() <<
-		"/" << std::hex << pthread_self() << std::dec <<
-		" " << datetime_buf << "." << std::setfill('0') << std::setw(4) <<
+		"[ " << datetime_buf << "." << std::setfill('0') << std::setw(4) <<
 			(unsigned long) (tv.tv_usec / 100) <<
+		" " << std::dec << getpid() << "/" <<
+			std::hex << pthread_self() << std::dec <<
 		" " << file << ":" << line <<
 		" ]: ";
 }
 
+static void
+_writeLogEntry(const StaticString &str) {
+	try {
+		writeExact(_logOutput, str.data(), str.size());
+	} catch (const SystemException &) {
+		/* The most likely reason why this fails is when the user has setup
+		 * Apache to log to a pipe (e.g. to a log rotation script). Upon
+		 * restarting the web server, the process that reads from the pipe
+		 * shuts down, so we can't write to it anymore. That's why we
+		 * just ignore write errors. It doesn't make sense to abort for
+		 * something like this.
+		 */
+	}
+}
+
 void
 _writeLogEntry(const std::string &str) {
-	size_t written = 0;
-	do {
-		ssize_t ret = write(_logOutput, str.data() + written, str.size() - written);
-		if (ret != -1) {
-			written += ret;
+	_writeLogEntry(StaticString(str));
+}
+
+static void
+realPrintAppOutput(char *buf, unsigned int bufSize,
+	const char *pidStr, unsigned int pidStrLen,
+	const char *channelName, unsigned int channelNameLen,
+	const char *message, unsigned int messageLen)
+{
+	char *pos = buf;
+	char *end = buf + bufSize;
+
+	pos = appendData(pos, end, "App ");
+	pos = appendData(pos, end, pidStr, pidStrLen);
+	pos = appendData(pos, end, " ");
+	pos = appendData(pos, end, channelName, channelNameLen);
+	pos = appendData(pos, end, ": ");
+	pos = appendData(pos, end, message, messageLen);
+	pos = appendData(pos, end, "\n");
+	_writeLogEntry(StaticString(buf, pos - buf));
+}
+
+void
+printAppOutput(pid_t pid, const char *channelName, const char *message, unsigned int size) {
+	if (printAppOutputAsDebuggingMessages) {
+		P_DEBUG("App " << pid << " " << channelName << ": " << StaticString(message, size));
+	} else {
+		char pidStr[sizeof("4294967295")];
+		unsigned int pidStrLen, channelNameLen, totalLen;
+
+		try {
+			pidStrLen = integerToOtherBase<pid_t, 10>(pid, pidStr, sizeof(pidStr));
+		} catch (const std::length_error &) {
+			pidStr[0] = '?';
+			pidStr[1] = '\0';
+			pidStrLen = 1;
 		}
-	} while (written < str.size());
+
+		channelNameLen = strlen(channelName);
+		totalLen = (sizeof("App X Y: \n") - 2) + pidStrLen + channelNameLen + size;
+		if (totalLen < 1024) {
+			char buf[1024];
+			realPrintAppOutput(buf, sizeof(buf),
+				pidStr, pidStrLen,
+				channelName, channelNameLen,
+				message, size);
+		} else {
+			DynamicBuffer buf(totalLen);
+			realPrintAppOutput(buf.data, totalLen,
+				pidStr, pidStrLen,
+				channelName, channelNameLen,
+				message, size);
+		}
+	}
+}
+
+void
+setPrintAppOutputAsDebuggingMessages(bool enabled) {
+	printAppOutputAsDebuggingMessages = enabled;
 }
 
 } // namespace Passenger

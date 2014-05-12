@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010-2013 Phusion
+ *  Copyright (c) 2010-2014 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -56,6 +56,7 @@
 #include <Utils/MD5.h>
 #include <Utils/IOUtils.h>
 #include <Utils/MessageIO.h>
+#include <Utils/VariantMap.h>
 #include <Utils/StrIntUtils.h>
 #include <Utils/StringMap.h>
 
@@ -73,7 +74,7 @@ private:
 	static const int GARBAGE_COLLECTION_TIMEOUT = 4500;  // 1 hour 15 minutes
 	
 	struct LogSink;
-	typedef shared_ptr<LogSink> LogSinkPtr;
+	typedef boost::shared_ptr<LogSink> LogSinkPtr;
 	typedef map<string, LogSinkPtr> LogSinkCache;
 	
 	struct LogSink {
@@ -92,6 +93,9 @@ private:
 		
 		/** Last time data was actually written to the underlying storage device. */
 		ev_tstamp lastFlushed;
+
+		/** The amount of data that has been written to this sink so far. */
+		unsigned int writtenTo;
 		
 		/**
 		 * This LogSink's iterator inside LoggingServer.logSinkCache.
@@ -109,6 +113,7 @@ private:
 			opened = 0;
 			lastUsed = ev_now(server->getLoop());
 			lastFlushed = lastUsed;
+			writtenTo = 0;
 		}
 		
 		virtual ~LogSink() {
@@ -119,10 +124,23 @@ private:
 		virtual bool isRemote() const {
 			return false;
 		}
+
+		// Default interval at which this sink should be flushed.
+		virtual unsigned int defaultFlushInterval() const {
+			return 5;
+		}
 		
 		virtual void append(const DataStoreId &dataStoreId,
-			const StaticString &data) = 0;
-		virtual bool flush() { return true; }
+			const StaticString &data)
+		{
+			writtenTo += data.size();
+		}
+		
+		virtual bool flush() {
+			lastFlushed = ev_now(server->getLoop());
+			return true;
+		}
+		
 		virtual void dump(ostream &stream) const { }
 	};
 	
@@ -152,23 +170,20 @@ private:
 		}
 		
 		virtual void append(const DataStoreId &dataStoreId, const StaticString &data) {
+			LogSink::append(dataStoreId, data);
 			syscalls::write(fd, data.data(), data.size());
 		}
-		
-		virtual bool flush() {
-			lastFlushed = ev_now(server->getLoop());
-			return true;
-		}
-		
+
 		virtual void dump(ostream &stream) const {
 			stream << "   * Log file: " << filename << "\n";
 			stream << "     Opened     : " << opened << "\n";
 			stream << "     LastUsed   : " << distanceOfTimeInWords((time_t) lastUsed) << " ago\n";
 			stream << "     LastFlushed: " << distanceOfTimeInWords((time_t) lastFlushed) << " ago\n";
+			stream << "     WrittenTo  : " << writtenTo << "\n";
 		}
 	};
 	
-	typedef shared_ptr<LogFileSink> LogFileSinkPtr;
+	typedef boost::shared_ptr<LogFileSink> LogFileSinkPtr;
 	
 	struct RemoteSink: public LogSink {
 		/* RemoteSender compresses the data with zlib before sending it
@@ -211,8 +226,13 @@ private:
 		virtual bool isRemote() const {
 			return true;
 		}
+
+		virtual unsigned int defaultFlushInterval() const {
+			return 5;
+		}
 		
 		virtual void append(const DataStoreId &dataStoreId, const StaticString &data) {
+			LogSink::append(dataStoreId, data);
 			if (bufferSize + data.size() > BUFFER_CAPACITY) {
 				StaticString data2[2];
 				data2[0] = StaticString(buffer, bufferSize);
@@ -235,10 +255,16 @@ private:
 				server->remoteSender.schedule(unionStationKey, nodeName,
 					category, &data, 1);
 				bufferSize = 0;
+				P_DEBUG("Flushed remote sink " << inspect() << ": " << bufferSize << " bytes");
 				return true;
 			} else {
+				P_DEBUG("Flushed remote sink " << inspect() << ": 0 bytes");
 				return false;
 			}
+		}
+
+		string inspect() const {
+			return "(key=" + unionStationKey + ", node=" + nodeName + ", category=" + category + ")";
 		}
 		
 		virtual void dump(ostream &stream) const {
@@ -249,6 +275,7 @@ private:
 			stream << "     Opened     : " << opened << "\n";
 			stream << "     LastUsed   : " << distanceOfTimeInWords((time_t) lastUsed) << " ago\n";
 			stream << "     LastFlushed: " << distanceOfTimeInWords((time_t) lastFlushed) << " ago\n";
+			stream << "     WrittenTo  : " << writtenTo << "\n";
 			stream << "     BufferSize : " << bufferSize << "\n";
 		}
 	};
@@ -336,7 +363,7 @@ private:
 		}
 	};
 	
-	typedef shared_ptr<Transaction> TransactionPtr;
+	typedef boost::shared_ptr<Transaction> TransactionPtr;
 	
 	enum ClientType {
 		UNINITIALIZED,
@@ -362,14 +389,29 @@ private:
 			type = UNINITIALIZED;
 			dataReader.setMaxSize(1024 * 128);
 		}
+
+		template<typename Stream>
+		void inspect(Stream &stream) const {
+			stream << "   * Client " << (int) fd << "\n";
+			stream << "     Initialized      : " << bool(type == LOGGER) << "\n";
+			stream << "     Node name        : " << nodeName << "\n";
+			stream << "     Open transactions: (" << openTransactions.size() << ")";
+			set<string>::const_iterator it, end = openTransactions.end();
+			for (it = openTransactions.begin(); it != end; it++) {
+				stream << " " << *it;
+			}
+			stream << "\n";
+			stream << "     Connection state : " << getStateName() << "\n";
+			stream << "     Message state    : " << messageServer.getStateName() << "\n";
+			stream << "     Outbox           : " << outbox.size() << " bytes\n";
+		}
 	};
 	
-	typedef shared_ptr<Client> ClientPtr;
+	typedef boost::shared_ptr<Client> ClientPtr;
 	typedef map<string, TransactionPtr> TransactionMap;
 	
-	typedef shared_ptr<FilterSupport::Filter> FilterPtr;
+	typedef boost::shared_ptr<FilterSupport::Filter> FilterPtr;
 	
-	string dumpFile;
 	RemoteSender remoteSender;
 	ev::timer garbageCollectionTimer;
 	ev::timer sinkFlushingTimer;
@@ -390,6 +432,8 @@ private:
 	bool refuseNewConnections;
 	bool exitRequested;
 	unsigned long long exitBeginTime;
+	int sinkFlushInterval;
+	string dumpFile;
 	
 	void sendErrorToClient(Client *client, const string &message) {
 		client->writeArrayMessage("error", message.c_str(), NULL);
@@ -499,7 +543,7 @@ private:
 		LogSinkCache::iterator it = logSinkCache.find(cacheKey);
 		if (it == logSinkCache.end()) {
 			trimLogSinkCache(MAX_LOG_SINK_CACHE_SIZE - 1);
-			result = make_shared<LogFileSink>(this, dumpFile);
+			result = boost::make_shared<LogFileSink>(this, dumpFile);
 			pair<LogSinkCache::iterator, bool> p =
 				logSinkCache.insert(make_pair(cacheKey, result));
 			result->cacheIterator = p.first;
@@ -529,7 +573,7 @@ private:
 		LogSinkCache::iterator it = logSinkCache.find(cacheKey);
 		if (it == logSinkCache.end()) {
 			trimLogSinkCache(MAX_LOG_SINK_CACHE_SIZE - 1);
-			result = make_shared<RemoteSink>(this, unionStationKey,
+			result = boost::make_shared<RemoteSink>(this, unionStationKey,
 				nodeName, category);
 			pair<LogSinkCache::iterator, bool> p =
 				logSinkCache.insert(make_pair(cacheKey, result));
@@ -581,7 +625,7 @@ private:
 		// TODO: garbage collect filters based on time
 		FilterPtr filter = filters.get(source);
 		if (filter == NULL) {
-			filter = make_shared<FilterSupport::Filter>(source);
+			filter = boost::make_shared<FilterSupport::Filter>(source);
 			filters.set(source, filter);
 		}
 		return *filter;
@@ -611,15 +655,6 @@ private:
 		char writeCountStr[sizeof(unsigned int) * 2 + 1];
 		integerToHexatri(transaction->writeCount, writeCountStr);
 		transaction->writeCount++;
-		transaction->data.reserve(transaction->data.size() +
-			transaction->txnId.size() +
-			1 +
-			timestamp.size() +
-			1 +
-			strlen(writeCountStr) +
-			1 +
-			data.size() +
-			1);
 		transaction->data.append(transaction->txnId);
 		transaction->data.append(" ");
 		transaction->data.append(timestamp);
@@ -659,7 +694,7 @@ private:
 	}
 	
 	bool isDirectory(const string &dir, struct dirent *entry) const {
-		#if defined(__sun__) || defined(_AIX)
+		#if defined(__sun__) || defined(sun) || defined(_AIX)
 			string path = dir;
 			path.append("/");
 			path.append(entry->d_name);
@@ -703,23 +738,24 @@ private:
 		P_DEBUG("Garbage collection time");
 		releaseInactiveLogSinks(ev_now(getLoop()));
 	}
+
+	ev_tstamp getFlushInterval(const LogSink *sink) const {
+		if (sinkFlushInterval == 0) {
+			return sink->defaultFlushInterval();
+		} else {
+			return sinkFlushInterval;
+		}
+	}
 	
 	void sinkFlushTimeout(ev::timer &timer, int revents) {
-		P_TRACE(2, "Flushing all sinks (periodic action)");
+		P_DEBUG("Flushing all sinks");
 		LogSinkCache::iterator it;
 		LogSinkCache::iterator end = logSinkCache.end();
 		ev_tstamp now = ev_now(getLoop());
 		
 		for (it = logSinkCache.begin(); it != end; it++) {
 			LogSink *sink = it->second.get();
-			
-			// Flush log file sinks every 15 seconds,
-			// remote sinks every 60 seconds.
-			if (sink->isRemote()) {
-				if (now - sink->lastFlushed >= 60) {
-					sink->flush();
-				}
-			} else {
+			if (now - sink->lastFlushed >= getFlushInterval(sink)) {
 				sink->flush();
 			}
 		}
@@ -833,8 +869,8 @@ protected:
 					return true;
 				}
 				
-				transaction = make_shared<Transaction>(this, ev_now(getLoop()));
-				if (unionStationKey.empty()) {
+				transaction = boost::make_shared<Transaction>(this, ev_now(getLoop()));
+				if (unionStationKey.empty() || unionStationKey == "-") {
 					char tempNodeId[MD5_HEX_SIZE];
 					
 					if (nodeId == NULL) {
@@ -1080,25 +1116,24 @@ public:
 	LoggingServer(struct ev_loop *loop,
 		FileDescriptor fd,
 		const AccountsDatabasePtr &accountsDatabase,
-		const string &dumpFile,
-		const string &unionStationGatewayAddress = DEFAULT_UNION_STATION_GATEWAY_ADDRESS,
-		unsigned short unionStationGatewayPort = DEFAULT_UNION_STATION_GATEWAY_PORT,
-		const string &unionStationGatewayCert = "",
-		const string &unionStationProxyAddress = "")
+		const VariantMap &options = VariantMap())
 		: EventedMessageServer(loop, fd, accountsDatabase),
-		  remoteSender(unionStationGatewayAddress,
-		               unionStationGatewayPort,
-		               unionStationGatewayCert,
-		               unionStationProxyAddress),
+		  remoteSender(
+		      options.get("union_station_gateway_address", false, DEFAULT_UNION_STATION_GATEWAY_ADDRESS),
+		      options.getInt("union_station_gateway_port", false, DEFAULT_UNION_STATION_GATEWAY_PORT),
+		      options.get("union_station_gateway_cert", false, ""),
+		      options.get("union_station_proxy_address", false)),
 		  garbageCollectionTimer(loop),
 		  sinkFlushingTimer(loop),
-		  exitTimer(loop)
+		  exitTimer(loop),
+		  dumpFile(options.get("analytics_dump_file", false, "/dev/null"))
 	{
-		this->dumpFile = dumpFile;
+		int sinkFlushTimerInterval = options.getInt("analytics_sink_flush_timer_interval", false, 5);
+		sinkFlushInterval = options.getInt("analytics_sink_flush_interval", false, 0);
 		garbageCollectionTimer.set<LoggingServer, &LoggingServer::garbageCollect>(this);
 		garbageCollectionTimer.start(GARBAGE_COLLECTION_TIMEOUT, GARBAGE_COLLECTION_TIMEOUT);
 		sinkFlushingTimer.set<LoggingServer, &LoggingServer::sinkFlushTimeout>(this);
-		sinkFlushingTimer.start(15, 15);
+		sinkFlushingTimer.start(sinkFlushTimerInterval, sinkFlushTimerInterval);
 		exitTimer.set<LoggingServer, &LoggingServer::exitTimerTimeout>(this);
 		exitTimer.set(0.05, 0.05);
 		refuseNewConnections = false;
@@ -1128,8 +1163,17 @@ public:
 		TransactionMap::const_iterator it;
 		TransactionMap::const_iterator end = transactions.end();
 		
-		stream << "Number of clients : " << getClients().size() << "\n";
-		stream << "RemoteSender queue: " << remoteSender.queued() << " items\n";
+		ClientSet::const_iterator cit, cend = getClients().end();
+		stream << "Clients:\n";
+		stream << "  Count: " << getClients().size() << "\n";
+		for (cit = getClients().begin(); cit != cend; cit++) {
+			const Client *client = static_cast<Client *>(*cit);
+			client->inspect(stream);
+		}
+		stream << "\n";
+
+		stream << "RemoteSender:\n";
+		remoteSender.inspect(stream);
 		stream << "\n";
 
 		LogSinkCache::const_iterator sit;
@@ -1152,7 +1196,7 @@ public:
 	}
 };
 
-typedef shared_ptr<LoggingServer> LoggingServerPtr;
+typedef boost::shared_ptr<LoggingServer> LoggingServerPtr;
 
 
 } // namespace Passenger

@@ -21,11 +21,12 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
-require 'phusion_passenger/platform_info/cxx_portability'
+PhusionPassenger.require_passenger_lib 'platform_info/compiler'
+PhusionPassenger.require_passenger_lib 'platform_info/cxx_portability'
 
 ########## Phusion Passenger common library ##########
 
-require 'phusion_passenger/common_library'
+PhusionPassenger.require_passenger_lib 'common_library'
 
 
 ########## libboost_oxt ##########
@@ -33,7 +34,7 @@ require 'phusion_passenger/common_library'
 # Defines tasks for compiling a static library containing Boost and OXT.
 def define_libboost_oxt_task(namespace, output_dir, extra_compiler_flags = nil)
 	output_file = "#{output_dir}.a"
-	flags = "-Iext #{extra_compiler_flags} #{PlatformInfo.portability_cflags} #{EXTRA_CXXFLAGS}"
+	flags = "-Iext #{extra_compiler_flags} #{EXTRA_CXXFLAGS}"
 	
 	if false && boolean_option('RELEASE')
 		# Disable RELEASE support. Passenger Standalone wants to link to the
@@ -124,11 +125,16 @@ if USE_VENDORED_LIBEV
 		"ext/libev/Makefile.am"
 	]
 	file LIBEV_OUTPUT_DIR + "Makefile" => dependencies do
+		cc = PlatformInfo.cc
+		cxx = PlatformInfo.cxx
 		# Disable all warnings: http://pod.tst.eu/http://cvs.schmorp.de/libev/ev.pod#COMPILER_WARNINGS
-		cflags = "#{EXTRA_CXXFLAGS} -w"
+		cflags = "#{EXTRA_CFLAGS} -w"
 		sh "mkdir -p #{LIBEV_OUTPUT_DIR}" if !File.directory?(LIBEV_OUTPUT_DIR)
 		sh "cd #{LIBEV_OUTPUT_DIR} && sh #{LIBEV_SOURCE_DIR}configure " +
-			"--disable-shared --enable-static CFLAGS='#{cflags}' orig_CFLAGS=1"
+			"--disable-shared --enable-static " +
+			# libev's configure script may select a different default compiler than we
+			# do, so we force our compiler choice.
+			"CC='#{cc}' CXX='#{cxx}' CFLAGS='#{cflags}' orig_CFLAGS=1"
 	end
 	
 	libev_sources = Dir["ext/libev/{*.c,*.h}"]
@@ -151,6 +157,9 @@ else
 	task :libev  # do nothing
 end
 
+# Apple Clang 4.2 complains about ambiguous member templates in ev++.h.
+LIBEV_CFLAGS << " -Wno-ambiguous-member-template" if PlatformInfo.compiler_supports_wno_ambiguous_member_template?
+
 
 ########## libeio ##########
 
@@ -168,12 +177,17 @@ if USE_VENDORED_LIBEIO
 		"ext/libeio/Makefile.am"
 	]
 	file LIBEIO_OUTPUT_DIR + "Makefile" => dependencies do
+		cc = PlatformInfo.cc
+		cxx = PlatformInfo.cxx
 		# Disable all warnings. The author has a clear standpoint on that:
 		# http://pod.tst.eu/http://cvs.schmorp.de/libev/ev.pod#COMPILER_WARNINGS
-		cflags = "#{EXTRA_CXXFLAGS} -w"
+		cflags = "#{EXTRA_CFLAGS} -w"
 		sh "mkdir -p #{LIBEIO_OUTPUT_DIR}" if !File.directory?(LIBEIO_OUTPUT_DIR)
 		sh "cd #{LIBEIO_OUTPUT_DIR} && sh #{LIBEIO_SOURCE_DIR}configure " +
-			"--disable-shared --enable-static CFLAGS='#{cflags}'"
+			"--disable-shared --enable-static " +
+			# libeio's configure script may select a different default compiler than we
+			# do, so we force our compiler choice.
+			"CC='#{cc}' CXX='#{cxx}' CFLAGS='#{cflags}'"
 	end
 	
 	libeio_sources = Dir["ext/libeio/{*.c,*.h}"]
@@ -195,11 +209,27 @@ else
 end
 
 
+########## Shared definitions ##########
+# Shared definition files should be in source control so that they don't
+# have to be built by users. Users may not have write access to the source
+# root, for example as is the case with Passenger Standalone.
+#
+# If you add a new shared definition file, don't forget to update
+# lib/phusion_passenger/packaging.rb!
+
+dependencies = ['ext/common/Constants.h.erb', 'lib/phusion_passenger.rb', 'lib/phusion_passenger/constants.rb']
+file 'ext/common/Constants.h' => dependencies do
+	PhusionPassenger.require_passenger_lib 'constants'
+	template = TemplateRenderer.new('ext/common/Constants.h.erb')
+	template.render_to('ext/common/Constants.h')
+end
+
+
 ##############################
 
 
 libboost_oxt_cflags = ""
-libboost_oxt_cflags << " -faddress-sanitizer" if USE_ASAN
+libboost_oxt_cflags << " #{PlatformInfo.adress_sanitizer_flag}" if USE_ASAN
 libboost_oxt_cflags.strip!
 LIBBOOST_OXT = define_libboost_oxt_task("common", COMMON_OUTPUT_DIR + "libboost_oxt", libboost_oxt_cflags)
 COMMON_LIBRARY.define_tasks(libboost_oxt_cflags)

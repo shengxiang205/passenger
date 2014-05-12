@@ -29,9 +29,12 @@ task 'test:ruby' => dependencies do
 	if PlatformInfo.rspec.nil?
 		abort "RSpec is not installed for Ruby interpreter '#{PlatformInfo.ruby_command}'. Please install it."
 	else
-		Dir.chdir("test") do
-			ruby "#{PlatformInfo.rspec} -c -f s -P 'dont-autoload-anything' ruby/*_spec.rb ruby/*/*_spec.rb"
+		if maybe_grep = string_option('E')
+			require 'shellwords'
+			maybe_grep = "-e #{Shellwords.escape(maybe_grep)}"
 		end
+		command = "#{PlatformInfo.rspec} -c -f s -P 'dont-autoload-anything' #{maybe_grep} ruby/*_spec.rb ruby/*/*_spec.rb"
+		sh "cd test && exec #{command}"
 	end
 end
 

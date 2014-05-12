@@ -23,7 +23,7 @@
 #  THE SOFTWARE.
 
 require 'socket'
-require 'phusion_passenger/native_support'
+PhusionPassenger.require_passenger_lib 'native_support'
 
 module PhusionPassenger
 
@@ -31,7 +31,7 @@ module PhusionPassenger
 module PreloaderSharedHelpers
 	extend self
 
-	def init
+	def init(options)
 		if !Kernel.respond_to?(:fork)
 			message = "Smart spawning is not available on this Ruby " +
 				"implementation because it does not support `Kernel.fork`. "
@@ -42,6 +42,7 @@ module PreloaderSharedHelpers
 			end
 			raise(message)
 		end
+		return options
 	end
 	
 	def accept_and_process_next_client(server_socket)
@@ -71,15 +72,24 @@ module PreloaderSharedHelpers
 				client.flush
 				client.sync = true
 				return [:forked, client]
-			else
+			elsif defined?(NativeSupport)
 				NativeSupport.detach_process(pid)
+			else
+				Process.detach(pid)
 			end
 		else
 			STDERR.puts "Unknown command '#{command.inspect}'"
 		end
 		return nil
 	ensure
-		client.close if client && Process.pid == original_pid
+		if client && Process.pid == original_pid
+			begin
+				client.close
+			rescue Errno::EINVAL
+				# Work around OS X bug.
+				# https://code.google.com/p/phusion-passenger/issues/detail?id=854
+			end
+		end
 	end
 	
 	def run_main_loop(options)
@@ -99,7 +109,10 @@ module PreloaderSharedHelpers
 		puts "!> "
 		
 		while true
-			ios = select([server, STDIN])[0]
+			# We call ::select just in case someone overwrites the global select()
+			# function by including ActionView::Helpers in the wrong place.
+			# https://code.google.com/p/phusion-passenger/issues/detail?id=915
+			ios = Kernel.select([server, STDIN])[0]
 			if ios.include?(server)
 				result, client = accept_and_process_next_client(server)
 				if result == :forked

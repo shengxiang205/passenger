@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2011 Phusion
+ *  Copyright (c) 2011-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -41,7 +41,7 @@ namespace Passenger {
 using namespace oxt;
 
 static boost::mutex syncher;
-static condition_variable cond;
+static boost::condition_variable cond;
 static bool shouldPoll = false;
 static oxt::thread *thr = NULL;
 static bool quit = false;
@@ -54,7 +54,13 @@ struct Data {
 	Data(const SafeLibevPtr &_libev, const MultiLibeio::Callback &_callback)
 		: libev(_libev),
 		  callback(_callback)
-		{ }
+	{
+		// If this assertion fails, then in the context of RequestHandler it means
+		// that it was operating on a client that has already been disconnected.
+		// The RequestHandler code is probably missing some necessary checks on
+		// `client->connected()`.
+		assert(_libev != NULL);
+	}
 };
 
 struct CustomData: public Data {
@@ -71,7 +77,7 @@ struct CustomData: public Data {
 
 static void
 threadMain() {
-	unique_lock<boost::mutex> l(syncher);
+	boost::unique_lock<boost::mutex> l(syncher);
 	while (!quit) {
 		while (!shouldPoll && !quit) {
 			cond.wait(l);
@@ -87,7 +93,7 @@ threadMain() {
 
 static void
 wantPoll() {
-	lock_guard<boost::mutex> l(syncher);
+	boost::lock_guard<boost::mutex> l(syncher);
 	shouldPoll = true;
 	cond.notify_one();
 }
@@ -95,8 +101,8 @@ wantPoll() {
 static int
 dispatch(eio_req *req) {
 	auto_ptr<Data> data((Data *) req->data);
-	assert(data->libev != NULL); // Check for strange bug.
-	data->libev->runLaterTS(boost::bind(data->callback, *req));
+	assert(data->libev != NULL);
+	data->libev->runLater(boost::bind(data->callback, *req));
 	return 0;
 }
 
@@ -111,13 +117,13 @@ executeWrapper(eio_req *req) {
 
 	static void
 	lockedPread(int fd, void *buf, size_t length, off_t offset, eio_req *req) {
-		lock_guard<boost::mutex> l(preadWriteLock);
+		boost::lock_guard<boost::mutex> l(preadWriteLock);
 		req->result = pread(fd, buf, length, offset);
 	}
 
 	static void
 	lockedPwrite(int fd, void *buf, size_t length, off_t offset, eio_req *req) {
-		lock_guard<boost::mutex> l(preadWriteLock);
+		boost::lock_guard<boost::mutex> l(preadWriteLock);
 		req->result = pwrite(fd, buf, length, offset);
 	}
 #endif
@@ -130,7 +136,7 @@ MultiLibeio::init() {
 
 void
 MultiLibeio::shutdown() {
-	unique_lock<boost::mutex> l(syncher);
+	boost::unique_lock<boost::mutex> l(syncher);
 	quit = true;
 	cond.notify_one();
 	l.unlock();

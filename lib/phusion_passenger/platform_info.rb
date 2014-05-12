@@ -1,5 +1,6 @@
+# encoding: binary
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010-2013 Phusion
+#  Copyright (c) 2010-2014 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -20,6 +21,8 @@
 #  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
+
+PhusionPassenger.require_passenger_lib 'utils/tmpio'
 
 module PhusionPassenger
 
@@ -149,20 +152,18 @@ private
 	private_class_method :reindent
 
 	def self.create_temp_file(name, dir = tmpdir)
-		tag = "#{Process.pid}.#{Thread.current.object_id.to_s(16)}"
-		if name =~ /\./
-			ext = File.extname(name)
-			name = File.basename(name, ext) + "-#{tag}#{ext}"
-		else
-			name = "#{name}-#{tag}"
-		end
-		filename = "#{dir}/#{name}"
-		f = File.open(filename, "w")
-		begin
-			yield(filename, f)
-		ensure
-			f.close if !f.closed?
-			File.unlink(filename) if File.exist?(filename)
+		# This function is mostly used for compiling C programs to autodetect
+		# system properties. We create a secure temp subdirectory to prevent
+		# TOCTU attacks, especially because we don't know how the compiler
+		# handles this.
+		PhusionPassenger::Utils.mktmpdir("passenger.", dir) do |subdir|
+			filename = "#{subdir}/#{name}"
+			f = File.open(filename, "w")
+			begin
+				yield(filename, f)
+			ensure
+				f.close if !f.closed?
+			end
 		end
 	end
 	private_class_method :create_temp_file
@@ -218,7 +219,9 @@ public
 	end
 
 	def self.read_file(filename)
-		return File.read(filename)
+		return File.open(filename, "rb") do |f|
+			f.read
+		end
 	rescue
 		return ""
 	end
@@ -245,9 +248,11 @@ public
 		dir = tmpdir
 		filename = "#{dir}/#{basename}"
 		begin
-			File.open(filename, 'w').close
+			File.open(filename, 'w') do |f|
+				f.puts("#!/bin/sh")
+			end
 			File.chmod(0700, filename)
-			if File.executable?(filename)
+			if system(filename)
 				return dir
 			else
 				attempts << { :dir => dir,
@@ -266,9 +271,11 @@ public
 		dir = Dir.pwd
 		filename = "#{dir}/#{basename}"
 		begin
-			File.open(filename, 'w').close
+			File.open(filename, 'w') do |f|
+				f.puts("#!/bin/sh")
+			end
 			File.chmod(0700, filename)
-			if File.executable?(filename)
+			if system(filename)
 				return dir
 			else
 				attempts << { :dir => dir,
@@ -284,7 +291,8 @@ public
 			File.unlink(filename) rescue nil
 		end
 		
-		message = "In order to run certain tests, this program " +
+		message = "ERROR: Cannot find suitable temporary directory\n" +
+			"In order to run certain tests, this program " +
 			"must be able to write temporary\n" +
 			"executable files to some directory. However no such " +
 			"directory can be found. \n" +
@@ -294,7 +302,7 @@ public
 			message << "   #{attempt[:error]}\n"
 		end
 		message << "\nYou can solve this problem by telling this program what directory to write\n" <<
-			"temporary executable files to.\n" <<
+			"temporary executable files to, as follows:\n" <<
 			"\n" <<
 			"  Set the $TMPDIR environment variable to the desired directory's filename and\n" <<
 			"  re-run this program.\n" <<
@@ -323,8 +331,17 @@ public
 	#
 	# This function exists because system('which') doesn't always behave
 	# correctly, for some weird reason.
-	def self.find_command(name)
+	#
+	# When `is_executable` is true, this function checks whether
+	# there is an executable named `name` in $PATH. When false, it
+	# assumes that `name` is not an executable name but a command string
+	# (e.g. "ccache gcc"). It then infers the executable name ("ccache")
+	# from the command string, and checks for that instead.
+	def self.find_command(name, is_executable = true)
 		name = name.to_s
+		if !is_executable && name =~ / /
+			name = name.sub(/ .*/, '')
+		end
 		if name =~ /^\//
 			if File.executable?(name)
 				return name
@@ -332,7 +349,8 @@ public
 				return nil
 			end
 		else
-			ENV['PATH'].to_s.split(File::PATH_SEPARATOR).detect do |directory|
+			ENV['PATH'].to_s.split(File::PATH_SEPARATOR).each do |directory|
+				next if directory.empty?
 				path = File.join(directory, name)
 				if File.file?(path) && File.executable?(path)
 					return path
@@ -340,6 +358,32 @@ public
 			end
 			return nil
 		end
+	end
+
+	def self.find_all_commands(name)
+		search_dirs = ENV['PATH'].to_s.split(File::PATH_SEPARATOR)
+		search_dirs.concat(%w(/bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin))
+		["/opt/*/bin", "/opt/*/sbin", "/usr/local/*/bin", "/usr/local/*/sbin"].each do |glob|
+			search_dirs.concat(Dir[glob])
+		end
+		search_dirs.delete("")
+		search_dirs.uniq!
+
+		result = []
+		search_dirs.each do |directory|
+			path = File.join(directory, name)
+			if !File.exist?(path)
+				log "Looking for #{path}: not found"
+			elsif !File.file?(path)
+				log "Looking for #{path}: found, but is not a file"
+			elsif !File.executable?(path)
+				log "Looking for #{path}: found, but is not executable"
+			else
+				log "Looking for #{path}: found"
+				result << path
+			end
+		end
+		return result
 	end
 end
 

@@ -1,5 +1,5 @@
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010 Phusion
+#  Copyright (c) 2010-2014 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -20,7 +20,7 @@
 #  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
-require 'phusion_passenger/standalone/command'
+PhusionPassenger.require_passenger_lib 'standalone/command'
 
 module PhusionPassenger
 module Standalone
@@ -31,7 +31,7 @@ class HelpCommand < Command
 	end
 	
 	def run
-		puts "Phusion Passenger Standalone, the easiest way to deploy Ruby web apps."
+		puts "Phusion Passenger Standalone, the easiest way to deploy web apps."
 		puts
 		puts "Available commands:"
 		puts

@@ -1,4 +1,29 @@
 /*
+ *  Phusion Passenger - https://www.phusionpassenger.com/
+ *  Copyright (c) 2012-2013 Phusion
+ *
+ *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the "Software"), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in
+ *  all copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ *  THE SOFTWARE.
+ */
+
+/*
  * Sets given environment variables, dumps the entire environment to
  * a given file (for diagnostics purposes), then execs the given command.
  *
@@ -14,6 +39,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <string>
 #include <Utils/Base64.h>
 
@@ -22,6 +48,22 @@ using namespace Passenger;
 
 extern "C" {
 	extern char **environ;
+}
+
+static void
+changeWorkingDir(const char *dir) {
+	int ret = chdir(dir);
+	if (ret == 0) {
+		setenv("PWD", dir, 1);
+	} else {
+		int e = errno;
+		printf("!> Error\n");
+		printf("!> \n");
+		printf("Unable to change working directory to '%s': %s (errno=%d)\n",
+			dir, strerror(e), e);
+		fflush(stdout);
+		exit(1);
+	}
 }
 
 static void
@@ -144,21 +186,30 @@ dumpInformation() {
 	#endif
 }
 
-// Usage: SpawnPreparer <envvars> <executable> <exec args...>
+// Usage: SpawnPreparer <working directory> <envvars> <executable> <exec args...>
 int
 main(int argc, char *argv[]) {
-	if (argc < 4) {
+	if (argc < 5) {
 		fprintf(stderr, "Too few arguments.\n");
 		exit(1);
 	}
 	
-	const char *envvars = argv[1];
-	const char *executable = argv[2];
-	char **execArgs = &argv[3];
+	const char *workingDir = argv[1];
+	const char *envvars = argv[2];
+	const char *executable = argv[3];
+	char **execArgs = &argv[4];
 	
+	changeWorkingDir(workingDir);
 	setGivenEnvVars(envvars);
 	dumpInformation();
 	
+	// Print a newline just in case whatever executed us printed data
+	// without a newline. Otherwise the next process's "!> I have control"
+	// command will not be properly recognized.
+	// https://code.google.com/p/phusion-passenger/issues/detail?id=842#c16
+	printf("\n");
+	fflush(stdout);
+
 	execvp(executable, (char * const *) execArgs);
 	int e = errno;
 	fprintf(stderr, "*** ERROR ***: Cannot execute %s: %s (%d)\n",

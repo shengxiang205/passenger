@@ -162,9 +162,20 @@ Client::onAppInputChunk(const char *data, size_t size, void *userData) {
 }
 
 void
+Client::onAppInputChunkEnd(void *userData) {
+	Client *client = (Client *) userData;
+	assert(client != NULL);
+	// onAppInputChunk() could have triggered an error which caused a disconnect.
+	if (client->connected()) {
+		client->requestHandler->onAppInputChunkEnd(client->shared_from_this());
+	}
+}
+
+void
 Client::onAppInputError(const EventedBufferedInputPtr &source, const char *message, int errnoCode) {
 	Client *client = (Client *) source->userData;
-	if (client != NULL) {
+	// onAppInputChunk() could have triggered an error which caused a disconnect.
+	if (client != NULL && client->connected()) {
 		client->requestHandler->onAppInputError(client->shared_from_this(), message, errnoCode);
 	}
 }
@@ -244,7 +255,7 @@ main() {
 	setLogLevel(3);
 	MultiLibeio::init();
 	loop = EV_DEFAULT;
-	libev = make_shared<SafeLibev>(loop);
+	libev = boost::make_shared<SafeLibev>(loop);
 	AgentOptions options;
 	ServerInstanceDir serverInstanceDir(getpid());
 	char root[PATH_MAX];
@@ -258,12 +269,12 @@ main() {
 	options.loggingAgentAddress = "unix:/tmp/agent";
 	options.loggingAgentPassword = "1234";
 
-	SpawnerFactoryPtr spawnerFactory = make_shared<SpawnerFactory>(libev,
+	SpawnerFactoryPtr spawnerFactory = boost::make_shared<SpawnerFactory>(libev,
 		ResourceLocator(root),
 		serverInstanceDir.newGeneration(true, "nobody", nogroup, getpid(), getgid()));
-	UnionStation::LoggerFactoryPtr loggerFactory = make_shared<UnionStation::LoggerFactory>(options.loggingAgentAddress,
+	UnionStation::LoggerFactoryPtr loggerFactory = boost::make_shared<UnionStation::LoggerFactory>(options.loggingAgentAddress,
 		"logging", options.loggingAgentPassword);
-	pool = make_shared<Pool>(libev.get(), spawnerFactory, loggerFactory);
+	pool = boost::make_shared<Pool>(libev.get(), spawnerFactory, loggerFactory);
 	FileDescriptor requestSocket(createTcpServer("127.0.0.1", 3000));
 	setNonBlocking(requestSocket);
 	handler = new RequestHandler(libev, requestSocket, pool, options);

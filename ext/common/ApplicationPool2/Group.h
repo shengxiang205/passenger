@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2011-2013 Phusion
+ *  Copyright (c) 2011-2014 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -37,12 +37,14 @@
 #include <oxt/macros.hpp>
 #include <oxt/thread.hpp>
 #include <oxt/dynamic_thread_group.hpp>
+#include <cstdlib>
 #include <cassert>
 #include <ApplicationPool2/Common.h>
 #include <ApplicationPool2/ComponentInfo.h>
 #include <ApplicationPool2/SpawnerFactory.h>
 #include <ApplicationPool2/Process.h>
 #include <ApplicationPool2/Options.h>
+#include <Hooks.h>
 #include <Utils.h>
 #include <Utils/CachedFileStat.hpp>
 #include <Utils/FileChangeChecker.h>
@@ -60,8 +62,9 @@ using namespace oxt;
  * Except for otherwise documented parts, this class is not thread-safe,
  * so only access within ApplicationPool lock.
  */
-class Group: public enable_shared_from_this<Group> {
-private:
+class Group: public boost::enable_shared_from_this<Group> {
+// Actually private, but marked public so that unit tests can access the fields.
+public:
 	friend class Pool;
 	friend class SuperGroup;
 	
@@ -79,44 +82,24 @@ private:
 			  callback(_callback)
 			{ }
 	};
+
+	struct RouteResult {
+		Process *process;
+		bool finished;
+
+		RouteResult(Process *p, bool _finished = false)
+			: process(p),
+			  finished(_finished)
+			{ }
+	};
 	
 	/**
-	 * Protects `m_shuttingDown`.
+	 * Protects `lifeStatus`.
 	 */
 	mutable boost::mutex lifetimeSyncher;
 	/**
-	 * A back reference to the containing SuperGroup. Should never
-	 * be NULL because a SuperGroup should outlive all its containing
-	 * Groups.
-	 * Read-only; only set during initialization.
-	 */
-	weak_ptr<SuperGroup> superGroup;
-	CachedFileStat cstat;
-	FileChangeChecker fileChangeChecker;
-	string restartFile;
-	string alwaysRestartFile;
-
-	/** Number of times a restart has been initiated so far. This is incremented immediately
-	 * in Group::restart(), and is used to abort the restarter thread that was active at the
-	 * time the restart was initiated. It's safe for the value to wrap around.
-	 */
-	unsigned int restartsInitiated;
-	/**
-	 * Whether process(es) are being spawned right now.
-	 */
-	bool m_spawning;
-	/** Whether a non-rolling restart is in progress (i.e. whether spawnThreadRealMain()
-	 * is at work). While it is in progress, it is not possible to signal the desire to
-	 * spawn new process. If spawning was already in progress when the restart was initiated,
-	 * then the spawning will abort as soon as possible.
+	 * A Group object progresses through a life.
 	 *
-	 * When rolling restarting is in progress, this flag is false.
-	 *
-	 * Invariant:
-	 *    if m_restarting: !m_spawning
-	 */
-	bool m_restarting;
-	/**
 	 * Do not access directly, always use `isAlive()`/`getLifeStatus()` or
 	 * through `lifetimeSyncher`.
 	 * 
@@ -137,11 +120,56 @@ private:
 		 */
 		SHUTTING_DOWN,
 		/**
-		 * Shut down. Object no longer usable. No Processes are referenced from
-		 * this Group anymore.
+		 * Shut down complete. Object no longer usable. No Processes are referenced
+		 * from this Group anymore.
 		 */
 		SHUT_DOWN
 	} lifeStatus;
+
+	/**
+	 * A back reference to the containing SuperGroup. Should never
+	 * be NULL because a SuperGroup should outlive all its containing
+	 * Groups.
+	 * Read-only; only set during initialization.
+	 */
+	boost::weak_ptr<SuperGroup> superGroup;
+	CachedFileStat cstat;
+	FileChangeChecker fileChangeChecker;
+	string restartFile;
+	string alwaysRestartFile;
+
+	/** Number of times a restart has been initiated so far. This is incremented immediately
+	 * in Group::restart(), and is used to abort the restarter thread that was active at the
+	 * time the restart was initiated. It's safe for the value to wrap around.
+	 */
+	unsigned int restartsInitiated;
+	/**
+	 * The number of processes that are being spawned right now.
+	 *
+	 * Invariant:
+	 *     if processesBeingSpawned > 0: m_spawning
+	 */
+	short processesBeingSpawned;
+	/**
+	 * Whether the spawner thread is currently working. Note that even
+	 * if it's working, it doesn't necessarily mean that processes are
+	 * being spawned (i.e. that processesBeingSpawned > 0). After the
+	 * thread is done spawning a process, it will attempt to attach
+	 * the newly-spawned process to the group. During that time it's not
+	 * technically spawning anything.
+	 */
+	bool m_spawning;
+	/** Whether a non-rolling restart is in progress (i.e. whether spawnThreadRealMain()
+	 * is at work). While it is in progress, it is not possible to signal the desire to
+	 * spawn new process. If spawning was already in progress when the restart was initiated,
+	 * then the spawning will abort as soon as possible.
+	 *
+	 * When rolling restarting is in progress, this flag is false.
+	 *
+	 * Invariant:
+	 *    if m_restarting: processesBeingSpawned == 0
+	 */
+	bool m_restarting;
 
 	/** Contains the spawn loop thread and the restarter thread. */
 	dynamic_thread_group interruptableThreads;
@@ -150,7 +178,7 @@ private:
 	 * whether any of the Processes can be shut down.
 	 */
 	bool detachedProcessesCheckerActive;
-	condition_variable detachedProcessesCheckerCond;
+	boost::condition_variable detachedProcessesCheckerCond;
 	Callback shutdownCallback;
 	GroupPtr selfPointer;
 	
@@ -170,19 +198,36 @@ private:
 	static string generateSecret(const SuperGroupPtr &superGroup);
 	void onSessionInitiateFailure(const ProcessPtr &process, Session *session);
 	void onSessionClose(const ProcessPtr &process, Session *session);
-	void lockAndAsyncOOBWRequestIfNeeded(const ProcessPtr &process, DisableResult result, GroupPtr self);
-	void asyncOOBWRequestIfNeeded(const ProcessPtr &process);
+
+	/** Returns whether it is allowed to perform a new OOBW in this group. */
+	bool oobwAllowed() const;
+	/** Returns whether a new OOBW should be initiated for this process. */
+	bool shouldInitiateOobw(const ProcessPtr &process) const;
+	void maybeInitiateOobw(const ProcessPtr &process);
+	void lockAndMaybeInitiateOobw(const ProcessPtr &process, DisableResult result, GroupPtr self);
+	void initiateOobw(const ProcessPtr &process);
 	void spawnThreadOOBWRequest(GroupPtr self, ProcessPtr process);
+	void initiateNextOobwRequest();
+
 	void spawnThreadMain(GroupPtr self, SpawnerPtr spawner, Options options,
 		unsigned int restartsInitiated);
 	void spawnThreadRealMain(const SpawnerPtr &spawner, const Options &options,
 		unsigned int restartsInitiated);
-	void finalizeRestart(GroupPtr self, Options options, SpawnerFactoryPtr spawnerFactory,
+	void finalizeRestart(GroupPtr self, Options options, RestartMethod method,
+		SpawnerFactoryPtr spawnerFactory, unsigned int restartsInitiated,
 		vector<Callback> postLockActions);
 	void startCheckingDetachedProcesses(bool immediately);
 	void detachedProcessesCheckerMain(GroupPtr self);
+	void wakeUpGarbageCollector();
 	bool poolAtFullCapacity() const;
 	bool anotherGroupIsWaitingForCapacity() const;
+	boost::shared_ptr<Group> findOtherGroupWaitingForCapacity() const;
+	ProcessPtr poolForceFreeCapacity(const Group *exclude, vector<Callback> &postLockActions);
+	bool testOverflowRequestQueue() const;
+	const ResourceLocator &getResourceLocator() const;
+	void runAttachHooks(const ProcessPtr process) const;
+	void runDetachHooks(const ProcessPtr process) const;
+	void setupAttachOrDetachHook(const ProcessPtr process, HookScriptOptions &options) const;
 
 	void verifyInvariants() const {
 		// !a || b: logical equivalent of a IMPLIES b.
@@ -191,22 +236,22 @@ private:
 		assert(disablingCount >= 0);
 		assert(disabledCount >= 0);
 		assert(enabledProcesses.empty() == (pqueue.top() == NULL));
-		assert(!( enabledCount == 0 && disablingCount > 0 ) || spawning());
-		assert(!( !spawning() ) || ( enabledCount > 0 || disablingCount == 0 ));
+		assert(!( enabledCount == 0 && disablingCount > 0 ) || ( processesBeingSpawned > 0) );
+		assert(!( !m_spawning ) || ( enabledCount > 0 || disablingCount == 0 ));
 
 		assert((lifeStatus == ALIVE) == (spawner != NULL));
 
 		// Verify getWaitlist invariants.
-		assert(!( !getWaitlist.empty() ) || ( enabledProcesses.empty() || pqueue.top()->atFullCapacity() ));
-		assert(!( !enabledProcesses.empty() && !pqueue.top()->atFullCapacity() ) || ( getWaitlist.empty() ));
-		assert(!( enabledProcesses.empty() && !spawning() && !restarting() && !poolAtFullCapacity() ) || ( getWaitlist.empty() ));
-		assert(!( !getWaitlist.empty() ) || ( !enabledProcesses.empty() || spawning() || restarting() || poolAtFullCapacity() ));
+		assert(!( !getWaitlist.empty() ) || ( enabledProcesses.empty() || verifyNoRequestsOnGetWaitlistAreRoutable() ));
+		assert(!( enabledProcesses.empty() && !m_spawning && !restarting() && !poolAtFullCapacity() ) || ( getWaitlist.empty() ));
+		assert(!( !getWaitlist.empty() ) || ( !enabledProcesses.empty() || m_spawning || restarting() || poolAtFullCapacity() ));
 		
 		// Verify disableWaitlist invariants.
 		assert((int) disableWaitlist.size() >= disablingCount);
 
-		// Verify m_spawning and m_restarting.
-		assert(!( m_restarting ) || !m_spawning);
+		// Verify processesBeingSpawned, m_spawning and m_restarting.
+		assert(!( processesBeingSpawned > 0 ) || ( m_spawning ));
+		assert(!( m_restarting ) || ( processesBeingSpawned == 0 ));
 
 		// Verify lifeStatus.
 		LifeStatus lifeStatus = getLifeStatus();
@@ -231,6 +276,8 @@ private:
 			assert(process->enabled == Process::ENABLED);
 			assert(process->pqHandle != NULL);
 			assert(process->isAlive());
+			assert(process->oobwStatus == Process::OOBW_NOT_ACTIVE
+				|| process->oobwStatus == Process::OOBW_REQUESTED);
 		}
 
 		end = disablingProcesses.end();
@@ -239,6 +286,8 @@ private:
 			assert(process->enabled == Process::DISABLING);
 			assert(process->pqHandle == NULL);
 			assert(process->isAlive());
+			assert(process->oobwStatus == Process::OOBW_NOT_ACTIVE
+				|| process->oobwStatus == Process::OOBW_IN_PROGRESS);
 		}
 
 		end = disabledProcesses.end();
@@ -247,14 +296,29 @@ private:
 			assert(process->enabled == Process::DISABLED);
 			assert(process->pqHandle == NULL);
 			assert(process->isAlive());
+			assert(process->oobwStatus == Process::OOBW_NOT_ACTIVE
+				|| process->oobwStatus == Process::OOBW_IN_PROGRESS);
 		}
 
 		foreach (const ProcessPtr &process, detachedProcesses) {
-			assert(process->getLifeStatus() == Process::SHUTTING_DOWN);
+			assert(process->enabled == Process::DETACHED);
 			assert(process->pqHandle == NULL);
 		}
 		#endif
 	}
+
+	#ifndef NDEBUG
+	bool verifyNoRequestsOnGetWaitlistAreRoutable() const {
+		deque<GetWaiter>::const_iterator it, end = getWaitlist.end();
+
+		for (it = getWaitlist.begin(); it != end; it++) {
+			if (route(it->options).process != NULL) {
+				return false;
+			}
+		}
+		return true;
+	}
+	#endif
 	
 	/**
 	 * Sets options for this Group. Called at creation time and at restart time.
@@ -286,29 +350,107 @@ private:
 	static void doCleanupSpawner(SpawnerPtr spawner) {
 		spawner->cleanup();
 	}
-	
-	SessionPtr newSession(Process *process = NULL) {
-		if (process == NULL) {
-			assert(enabledCount > 0);
-			process = pqueue.top();
+
+	unsigned int generateStickySessionId() {
+		unsigned int result;
+
+		while (true) {
+			result = (unsigned int) rand();
+			if (findProcessWithStickySessionId(result) == NULL) {
+				return result;
+			}
 		}
+		// Never reached; shut up compiler warning.
+		return 0;
+	}
+
+	/* Determines which process to route a get() action to. The returned process
+	 * is guaranteed to be `canBeRoutedTo()`, i.e. not totally busy.
+	 *
+	 * A request is routed to an enabled processes, or if there are none,
+	 * from a disabling process. The rationale is as follows:
+	 * If there are no enabled process, then waiting for one to spawn is too
+	 * expensive. The next best thing is to route to disabling processes
+	 * until more processes have been spawned.
+	 */
+	RouteResult route(const Options &options) const {
+		if (OXT_LIKELY(enabledCount > 0)) {
+			if (options.stickySessionId == 0) {
+				if (pqueue.top()->canBeRoutedTo()) {
+					return RouteResult(pqueue.top());
+				} else {
+					return RouteResult(NULL, true);
+				}
+			} else {
+				Process *process = findProcessWithStickySessionId(options.stickySessionId);
+				if (process != NULL) {
+					if (process->canBeRoutedTo()) {
+						return RouteResult(process);
+					} else {
+						return RouteResult(NULL, false);
+					}
+				} else if (pqueue.top()->canBeRoutedTo()) {
+					return RouteResult(pqueue.top());
+				} else {
+					return RouteResult(NULL, true);
+				}
+			}
+		} else {
+			Process *process = findProcessWithLowestBusyness(disablingProcesses);
+			if (process->canBeRoutedTo()) {
+				return RouteResult(process);
+			} else {
+				return RouteResult(NULL, true);
+			}
+		}
+	}
+
+	SessionPtr newSession(Process *process) {
 		SessionPtr session = process->newSession();
 		session->onInitiateFailure = _onSessionInitiateFailure;
 		session->onClose   = _onSessionClose;
 		if (process->enabled == Process::ENABLED) {
-			assert(process == pqueue.top());
-			pqueue.pop();
-			process->pqHandle = pqueue.push(process, process->utilization());
+			if (process == pqueue.top()) {
+				pqueue.pop();
+			} else {
+				pqueue.erase(process->pqHandle);
+			}
+			process->pqHandle = pqueue.push(process, process->busyness());
 		}
 		return session;
 	}
 
-	Process *findProcessWithLowestUtilization(const ProcessList &processes) const {
+	bool pushGetWaiter(const Options &newOptions, const GetCallback &callback) {
+		if (OXT_LIKELY(!testOverflowRequestQueue()
+			&& (newOptions.maxRequestQueueSize == 0
+			    || getWaitlist.size() < newOptions.maxRequestQueueSize)))
+		{
+			getWaitlist.push_back(GetWaiter(newOptions.copyAndPersist().clearLogger(), callback));
+			return true;
+		} else {
+			P_WARN("Request queue is full. Returning an error");
+			callback(SessionPtr(), boost::make_shared<RequestQueueFullException>());
+			return false;
+		}
+	}
+
+	Process *findProcessWithStickySessionId(unsigned int id) const {
+		ProcessList::const_iterator it, end = enabledProcesses.end();
+		for (it = enabledProcesses.begin(); it != end; it++) {
+			Process *process = it->get();
+			if (process->stickySessionId == id) {
+				return process;
+			}
+		}
+		return NULL;
+	}
+
+	Process *findProcessWithLowestBusyness(const ProcessList &processes) const {
 		Process *result = NULL;
 		ProcessList::const_iterator it, end = processes.end();
 		for (it = processes.begin(); it != end; it++) {
 			Process *process = it->get();
-			if (result == NULL || process->utilization() < result->utilization()) {
+			if (result == NULL || process->busyness() < result->busyness()) {
 				result = process;
 			}
 		}
@@ -322,24 +464,26 @@ private:
 	void removeProcessFromList(const ProcessPtr &process, ProcessList &source) {
 		ProcessPtr p = process; // Keep an extra reference count just in case.
 		source.erase(process->it);
-		if (process->isAlive()) {
-			switch (process->enabled) {
-			case Process::ENABLED:
-				enabledCount--;
-				pqueue.erase(process->pqHandle);
-				process->pqHandle = NULL;
-				break;
-			case Process::DISABLING:
-				disablingCount--;
-				break;
-			case Process::DISABLED:
-				disabledCount--;
-				break;
-			default:
-				P_BUG("Unknown 'enabled' state " << (int) process->enabled);
-			}
-		} else {
+		switch (process->enabled) {
+		case Process::ENABLED:
+			assert(&source == &enabledProcesses);
+			enabledCount--;
+			pqueue.erase(process->pqHandle);
+			process->pqHandle = NULL;
+			break;
+		case Process::DISABLING:
+			assert(&source == &disablingProcesses);
+			disablingCount--;
+			break;
+		case Process::DISABLED:
+			assert(&source == &disabledProcesses);
+			disabledCount--;
+			break;
+		case Process::DETACHED:
 			assert(&source == &detachedProcesses);
+			break;
+		default:
+			P_BUG("Unknown 'enabled' state " << (int) process->enabled);
 		}
 	}
 
@@ -354,7 +498,7 @@ private:
 		process->it = destination.last_iterator();
 		if (&destination == &enabledProcesses) {
 			process->enabled = Process::ENABLED;
-			process->pqHandle = pqueue.push(process.get(), process->utilization());
+			process->pqHandle = pqueue.push(process.get(), process->busyness());
 			enabledCount++;
 		} else if (&destination == &disablingProcesses) {
 			process->enabled = Process::DISABLING;
@@ -365,44 +509,44 @@ private:
 			disabledCount++;
 		} else if (&destination == &detachedProcesses) {
 			assert(process->isAlive());
+			process->enabled = Process::DETACHED;
+			process->abortLongRunningConnections();
 		} else {
 			P_BUG("Unknown destination list");
 		}
 	}
-	
+
 	template<typename Lock>
 	void assignSessionsToGetWaitersQuickly(Lock &lock) {
+		if (getWaitlist.empty()) {
+			verifyInvariants();
+			lock.unlock();
+			return;
+		}
+
 		SmallVector<GetAction, 50> actions;
+		unsigned int i = 0;
+		bool done = false;
+
 		actions.reserve(getWaitlist.size());
-		
-		// Checkout sessions from enabled processes, or if there are none,
-		// from disabling processes.
-		if (enabledCount > 0) {
-			while (!getWaitlist.empty() && pqueue.top() != NULL && !pqueue.top()->atFullCapacity()) {
+
+		while (!done && i < getWaitlist.size()) {
+			const GetWaiter &waiter = getWaitlist[i];
+			RouteResult result = route(waiter.options);
+			if (result.process != NULL) {
 				GetAction action;
-				action.callback = getWaitlist.front().callback;
-				action.session  = newSession();
-				getWaitlist.pop();
+				action.callback = waiter.callback;
+				action.session  = newSession(result.process);
+				getWaitlist.erase(getWaitlist.begin() + i);
 				actions.push_back(action);
-			}
-		} else if (disablingCount > 0) {
-			bool done = false;
-			while (!getWaitlist.empty() && !done) {
-				Process *process = findProcessWithLowestUtilization(
-					disablingProcesses);
-				assert(process != NULL);
-				if (process->atFullUtilization()) {
-					done = true;
-				} else {
-					GetAction action;
-					action.callback = getWaitlist.front().callback;
-					action.session  = newSession(process);
-					getWaitlist.pop();
-					actions.push_back(action);
+			} else {
+				done = result.finished;
+				if (!result.finished) {
+					i++;
 				}
 			}
 		}
-		
+
 		verifyInvariants();
 		lock.unlock();
 		SmallVector<GetAction, 50>::const_iterator it, end = actions.end();
@@ -412,32 +556,29 @@ private:
 	}
 	
 	void assignSessionsToGetWaiters(vector<Callback> &postLockActions) {
-		if (enabledCount > 0) {
-			while (!getWaitlist.empty() && pqueue.top() != NULL && !pqueue.top()->atFullCapacity()) {
+		unsigned int i = 0;
+		bool done = false;
+
+		while (!done && i < getWaitlist.size()) {
+			const GetWaiter &waiter = getWaitlist[i];
+			RouteResult result = route(waiter.options);
+			if (result.process != NULL) {
 				postLockActions.push_back(boost::bind(
-					getWaitlist.front().callback, newSession(),
+					waiter.callback,
+					newSession(result.process),
 					ExceptionPtr()));
-				getWaitlist.pop();
-			}
-		} else if (disablingCount > 0) {
-			bool done = false;
-			while (!getWaitlist.empty() && !done) {
-				Process *process = findProcessWithLowestUtilization(
-					disablingProcesses);
-				assert(process != NULL);
-				if (process->atFullUtilization()) {
-					done = true;
-				} else {
-					postLockActions.push_back(boost::bind(
-						getWaitlist.front().callback, newSession(process),
-						ExceptionPtr()));
-					getWaitlist.pop();
+				getWaitlist.erase(getWaitlist.begin() + i);
+			} else {
+				done = result.finished;
+				if (!result.finished) {
+					i++;
 				}
 			}
 		}
 	}
 
 	void enableAllDisablingProcesses(vector<Callback> &postLockActions) {
+		P_DEBUG("Enabling all DISABLING processes with result DR_ERROR");
 		deque<DisableWaiter>::iterator it, end = disableWaitlist.end();
 		for (it = disableWaitlist.begin(); it != end; it++) {
 			const DisableWaiter &waiter = *it;
@@ -448,6 +589,7 @@ private:
 			if (process->enabled == Process::DISABLING) {
 				removeProcessFromList(process, disablingProcesses);
 				addProcessToList(process, enabledProcesses);
+				P_DEBUG("Enabled process " << process->inspect());
 			}
 		}
 		clearDisableWaitlist(DR_ERROR, postLockActions);
@@ -482,14 +624,6 @@ private:
 		}
 	}
 
-	void shutdownAndRemoveProcess(const ProcessPtr &process) {
-		TRACE_POINT();
-		const ProcessPtr p = process;
-		assert(process->canBeShutDown());
-		removeProcessFromList(process, detachedProcesses);
-		process->shutdown();
-	}
-
 	bool shutdownCanFinish() const {
 		return getLifeStatus() == SHUTTING_DOWN
 			&& enabledCount == 0
@@ -516,7 +650,7 @@ private:
 		postLockActions.push_back(boost::bind(interruptAndJoinAllThreads,
 			shared_from_this()));
 		{
-			lock_guard<boost::mutex> l(lifetimeSyncher);
+			boost::lock_guard<boost::mutex> l(lifetimeSyncher);
 			lifeStatus = SHUT_DOWN;
 		}
 		selfPointer.reset();
@@ -551,7 +685,7 @@ public:
 	 * their numbers.
 	 * These lists do not intersect. A process is in exactly 1 list.
 	 *
-	 * 'pqueue' orders all enabled processes according to utilization() values,
+	 * 'pqueue' orders all enabled processes according to busyness() values,
 	 * from small to large.
 	 *
 	 * Invariants:
@@ -565,27 +699,30 @@ public:
 	 *    enabledProcesses.empty() == (pqueue.top() == NULL)
 	 *
 	 *    if (enabledCount == 0):
-	 *       spawning() || restarting() || poolAtFullCapacity()
+	 *       processesBeingSpawned > 0 || restarting() || poolAtFullCapacity()
 	 *    if (enabledCount == 0) and (disablingCount > 0):
-	 *       spawning()
-	 *    if !spawning():
-	 *       (enabledCount > 0) or (disablingCount == 0)
+	 *       processesBeingSpawned > 0
+	 *    if !m_spawning:
+	 *       (enabledCount > 0) || (disablingCount == 0)
 	 *
-	 *    if pqueue.top().atFullCapacity():
-	 *       All enabled processes are at full capacity.
+	 *    if pqueue.top().isTotallyBusy():
+	 *       All enabled processes are totally busy.
 	 *
 	 *    for all process in enabledProcesses:
 	 *       process.enabled == Process::ENABLED
 	 *       process.pqHandle != NULL
 	 *       process.isAlive()
+	 *       process.oobwStatus == Process::OOBW_NOT_ACTIVE || process.oobwStatus == Process::OOBW_REQUESTED
 	 *    for all processes in disablingProcesses:
 	 *       process.enabled == Process::DISABLING
 	 *       process.pqHandle == NULL
 	 *       process.isAlive()
+	 *       process.oobwStatus == Process::OOBW_NOT_ACTIVE || process.oobwStatus == Process::OOBW_IN_PROGRESS
 	 *    for all process in disabledProcesses:
 	 *       process.enabled == Process::DISABLED
 	 *       process.pqHandle == NULL
 	 *       process.isAlive()
+	 *       process.oobwStatus == Process::OOBW_NOT_ACTIVE || process.oobwStatus == Process::OOBW_IN_PROGRESS
 	 */
 	int enabledCount;
 	int disablingCount;
@@ -597,10 +734,10 @@ public:
 
 	/**
 	 * When a process is detached, it is stored here until we've confirmed
-	 * that it can be shut down.
+	 * that the OS process has exited.
 	 *
 	 * for all process in detachedProcesses:
-	 *    process.getLifeStatus() == Process::SHUTTING_DOWN
+	 *    process.enabled == Process::DETACHED
 	 *    process.pqHandle == NULL
 	 */
 	ProcessList detachedProcesses;
@@ -610,25 +747,33 @@ public:
 	 * put on this wait list, which must be processed as soon as the necessary
 	 * resources have become free.
 	 * 
-	 * 'std::' is required because Solaris in its infinite wisdom has a C
-	 * struct in its system headers called 'queue'.
-	 * http://code.google.com/p/phusion-passenger/issues/detail?id=840
-	 *
-	 * Invariant 1:
+	 * ### Invariant 1 (safety)
+	 * 
+	 * If requests are queued in the getWaitlist, then that's because there are
+	 * no processes that can serve them.
+	 * 
 	 *    if getWaitlist is non-empty:
-	 *       enabledProcesses.empty() || (all enabled processes are at full capacity)
-	 * Equivalently:
-	 *    if !enabledProcesses.empty() && (an enabled process is not at full capacity):
-	 *        getWaitlist is empty.
+	 *       enabledProcesses.empty() || (no request in getWaitlist is routeable)
 	 *
-	 * Invariant 2:
-	 *    if enabledProcesses.empty() && !spawning() && !restarting() && !poolAtFullCapacity():
+	 * Here, "routeable" is defined as `route(options).process != NULL`.
+	 * 
+	 * ### Invariant 2 (progress)
+	 *
+	 * The only reason why there are no enabled processes, while at the same time we're
+	 * not spawning or waiting for pool capacity, is because there is nothing to do.
+	 * 
+	 *    if enabledProcesses.empty() && !m_spawning && !restarting() && !poolAtFullCapacity():
 	 *       getWaitlist is empty
+	 * 
 	 * Equivalently:
+	 * If requests are queued in the getWaitlist, then either we have processes that can process
+	 * them (some time in the future), or we're actively trying to spawn processes, unless we're
+	 * unable to do that because of resource limits.
+	 * 
 	 *    if getWaitlist is non-empty:
-	 *       !enabledProcesses.empty() || spawning() || restarting() || poolAtFullCapacity()
+	 *       !enabledProcesses.empty() || m_spawning || restarting() || poolAtFullCapacity()
 	 */
-	std::queue<GetWaiter> getWaitlist;
+	deque<GetWaiter> getWaitlist;
 	/**
 	 * Disable() commands that couldn't finish immediately will put their callbacks
 	 * in this queue. Note that there may be multiple DisableWaiters pointing to the
@@ -644,7 +789,12 @@ public:
 	 *    (lifeStatus == ALIVE) == (spawner != NULL)
 	 */
 	SpawnerPtr spawner;
-	
+
+
+	/********************************************
+	 * Constructors and destructors
+	 ********************************************/
+
 	Group(const SuperGroupPtr &superGroup, const Options &options, const ComponentInfo &info);
 	~Group();
 
@@ -660,7 +810,7 @@ public:
 	void shutdown(const Callback &callback, vector<Callback> &postLockActions) {
 		assert(isAlive());
 
-		P_DEBUG("Shutting down group " << name);
+		P_DEBUG("Begin shutting down group " << name);
 		shutdownCallback = callback;
 		detachAll(postLockActions);
 		startCheckingDetachedProcesses(true);
@@ -670,86 +820,16 @@ public:
 		selfPointer = shared_from_this();
 		assert(disableWaitlist.empty());
 		{
-			lock_guard<boost::mutex> l(lifetimeSyncher);
+			boost::lock_guard<boost::mutex> l(lifetimeSyncher);
 			lifeStatus = SHUTTING_DOWN;
 		}
-		if (shutdownCanFinish()) {
-			finishShutdown(postLockActions);
-		} else {
-			P_DEBUG("Shutdown finalization of group " << name << " has been deferred");
-		}
 	}
 
-	SessionPtr get(const Options &newOptions, const GetCallback &callback) {
-		assert(isAlive());
 
-		if (OXT_LIKELY(!restarting())) {
-			if (OXT_UNLIKELY(needsRestart(newOptions))) {
-				restart(newOptions);
-			} else {
-				mergeOptions(newOptions);
-			}
-			if (OXT_UNLIKELY(!newOptions.noop && shouldSpawnForGetAction())) {
-				spawn();
-			}
-		}
-		
-		if (OXT_UNLIKELY(newOptions.noop)) {
-			ProcessPtr process = make_shared<Process>(SafeLibevPtr(),
-				0, string(), string(),
-				FileDescriptor(), FileDescriptor(),
-				SocketListPtr(), 0, 0);
-			process->dummy = true;
-			process->requiresShutdown = false;
-			process->setGroup(shared_from_this());
-			return make_shared<Session>(process, (Socket *) NULL);
-		}
-		
-		if (OXT_UNLIKELY(enabledCount == 0)) {
-			/* We don't have any processes yet, but they're on the way.
-			 *
-			 * We have some choices here. If there are disabling processes
-			 * then we generally want to use them, except:
-			 * - When non-rolling restarting because those disabling processes
-			 *   are from the old version.
-			 * - When all disabling processes are at full utilization.
-			 *
-			 * Whenever a disabling process cannot be used, call the callback
-			 * after a process has been spawned or has failed to spawn, or
-			 * when a disabling process becomes available.
-			 */
-			assert(spawning() || restarting() || poolAtFullCapacity());
+	/********************************************
+	 * Life time and back-reference methods
+	 ********************************************/
 
-			if (disablingCount > 0 && !restarting()) {
-				Process *process = findProcessWithLowestUtilization(
-					disablingProcesses);
-				assert(process != NULL);
-				if (!process->atFullUtilization()) {
-					return newSession(process);
-				}
-			}
-
-			getWaitlist.push(GetWaiter(newOptions.copyAndPersist().clearLogger(), callback));
-			P_DEBUG("No session checked out yet: group is spawning or restarting");
-			return SessionPtr();
-		} else {
-			Process *process = pqueue.top();
-			assert(process != NULL);
-			if (process->atFullCapacity()) {
-				/* Looks like all processes are at full capacity.
-				 * Wait until a new one has been spawned or until
-				 * resources have become free.
-				 */
-				getWaitlist.push(GetWaiter(newOptions.copyAndPersist().clearLogger(), callback));
-				P_DEBUG("No session checked out yet: all processes are at full capacity");
-				return SessionPtr();
-			} else {
-				P_DEBUG("Session checked out from process " << process->inspect());
-				return newSession();
-			}
-		}
-	}
-	
 	/**
 	 * Thread-safe.
 	 * @pre getLifeState() != SHUT_DOWN
@@ -773,30 +853,137 @@ public:
 	
 	// Thread-safe.
 	bool isAlive() const {
-		lock_guard<boost::mutex> lock(lifetimeSyncher);
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
 		return lifeStatus == ALIVE;
 	}
 
 	// Thread-safe.
 	LifeStatus getLifeStatus() const {
-		lock_guard<boost::mutex> lock(lifetimeSyncher);
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
 		return lifeStatus;
 	}
-	
+
+
+	/********************************************
+	 * Core methods
+	 ********************************************/
+
+	SessionPtr get(const Options &newOptions, const GetCallback &callback,
+		vector<Callback> &postLockActions)
+	{
+		assert(isAlive());
+
+		if (OXT_LIKELY(!restarting())) {
+			if (OXT_UNLIKELY(needsRestart(newOptions))) {
+				restart(newOptions);
+			} else {
+				mergeOptions(newOptions);
+			}
+			if (OXT_UNLIKELY(!newOptions.noop && shouldSpawnForGetAction())) {
+				// If we're trying to spawn the first process for this group, and
+				// spawning failed because the pool is at full capacity, then we
+				// try to kill some random idle process in the pool and try again.
+				if (spawn() == SR_ERR_POOL_AT_FULL_CAPACITY && enabledCount == 0) {
+					P_INFO("Unable to spawn the the sole process for group " << name <<
+						" because the max pool size has been reached. Trying " <<
+						"to shutdown another idle process to free capacity...");
+					if (poolForceFreeCapacity(this, postLockActions) != NULL) {
+						SpawnResult result = spawn();
+						assert(result == SR_OK);
+						(void) result;
+					} else {
+						P_INFO("There are no processes right now that are eligible "
+							"for shutdown. Will try again later.");
+					}
+				}
+			}
+		}
+		
+		if (OXT_UNLIKELY(newOptions.noop)) {
+			ProcessPtr process = boost::make_shared<Process>(SafeLibevPtr(),
+				0, string(), string(),
+				FileDescriptor(), FileDescriptor(),
+				SocketListPtr(), 0, 0);
+			process->dummy = true;
+			process->requiresShutdown = false;
+			process->setGroup(shared_from_this());
+			return boost::make_shared<Session>(process, (Socket *) NULL);
+		}
+		
+		if (OXT_UNLIKELY(enabledCount == 0)) {
+			/* We don't have any processes yet, but they're on the way.
+			 *
+			 * We have some choices here. If there are disabling processes
+			 * then we generally want to use them, except:
+			 * - When non-rolling restarting because those disabling processes
+			 *   are from the old version.
+			 * - When all disabling processes are totally busy.
+			 *
+			 * Whenever a disabling process cannot be used, call the callback
+			 * after a process has been spawned or has failed to spawn, or
+			 * when a disabling process becomes available.
+			 */
+			assert(m_spawning || restarting() || poolAtFullCapacity());
+
+			if (disablingCount > 0 && !restarting()) {
+				Process *process = findProcessWithLowestBusyness(
+					disablingProcesses);
+				assert(process != NULL);
+				if (!process->isTotallyBusy()) {
+					return newSession(process);
+				}
+			}
+
+			if (pushGetWaiter(newOptions, callback)) {
+				P_DEBUG("No session checked out yet: group is spawning or restarting");
+			}
+			return SessionPtr();
+		} else {
+			RouteResult result = route(newOptions);
+			if (result.process == NULL) {
+				/* Looks like all processes are totally busy.
+				 * Wait until a new one has been spawned or until
+				 * resources have become free.
+				 */
+				if (pushGetWaiter(newOptions, callback)) {
+					P_DEBUG("No session checked out yet: all processes are at full capacity");
+				}
+				return SessionPtr();
+			} else {
+				P_DEBUG("Session checked out from process " << result.process->inspect());
+				return newSession(result.process);
+			}
+		}
+	}
+
+
+	/********************************************
+	 * State mutation methods
+	 ********************************************/
+
 	// Thread-safe, but only call outside the pool lock!
 	void requestOOBW(const ProcessPtr &process);
-	
+
 	/**
 	 * Attaches the given process to this Group and mark it as enabled. This
-	 * function doesn't touch getWaitlist so be sure to fix its invariants
-	 * afterwards if necessary.
+	 * function doesn't touch `getWaitlist` so be sure to fix its invariants
+	 * afterwards if necessary, e.g. by calling `assignSessionsToGetWaiters()`.
 	 */
-	void attach(const ProcessPtr &process, vector<Callback> &postLockActions) {
+	AttachResult attach(const ProcessPtr &process, vector<Callback> &postLockActions) {
 		assert(process->getGroup() == NULL || process->getGroup().get() == this);
 		assert(process->isAlive());
 		assert(isAlive());
 
+		if (processUpperLimitsReached()) {
+			return AR_GROUP_UPPER_LIMITS_REACHED;
+		} else if (poolAtFullCapacity()) {
+			return AR_POOL_AT_FULL_CAPACITY;
+		} else if (!isWaitingForCapacity() && anotherGroupIsWaitingForCapacity()) {
+			return AR_ANOTHER_GROUP_IS_WAITING_FOR_CAPACITY;
+		}
+
 		process->setGroup(shared_from_this());
+		process->stickySessionId = generateStickySessionId();
 		P_DEBUG("Attaching process " << process->inspect());
 		addProcessToList(process, enabledProcesses);
 
@@ -827,6 +1014,13 @@ public:
 			}
 		}
 		disableWaitlist = newDisableWaitlist;
+
+		// Update GC sleep timer.
+		wakeUpGarbageCollector();
+
+		postLockActions.push_back(boost::bind(&Group::runAttachHooks, this, process));
+
+		return AR_OK;
 	}
 
 	/**
@@ -857,12 +1051,9 @@ public:
 		}
 
 		addProcessToList(process, detachedProcesses);
-		process->setShuttingDown();
-		if (process->canBeShutDown()) {
-			shutdownAndRemoveProcess(process);
-		} else {
-			startCheckingDetachedProcesses(false);
-		}
+		startCheckingDetachedProcesses(false);
+
+		postLockActions.push_back(boost::bind(&Group::runDetachHooks, this, process));
 	}
 	
 	/**
@@ -876,15 +1067,12 @@ public:
 		foreach (ProcessPtr process, enabledProcesses) {
 			addProcessToList(process, detachedProcesses);
 			process->pqHandle = NULL;
-			process->setShuttingDown();
 		}
 		foreach (ProcessPtr process, disablingProcesses) {
 			addProcessToList(process, detachedProcesses);
-			process->setShuttingDown();
 		}
 		foreach (ProcessPtr process, disabledProcesses) {
 			addProcessToList(process, detachedProcesses);
-			process->setShuttingDown();
 		}
 		
 		enabledProcesses.clear();
@@ -935,7 +1123,12 @@ public:
 			P_DEBUG("Disabling ENABLED process " << process->inspect() <<
 				"; enabledCount=" << enabledCount << ", process.sessions=" << process->sessions);
 			assert(enabledCount >= 0);
-			if (enabledCount <= 1 || process->sessions > 0) {
+			if (enabledCount == 1 && !allowSpawn()) {
+				P_WARN("Cannot disable sole enabled process in group " << name <<
+					" because spawning is not allowed according to the current" <<
+					" configuration options");
+				return DR_ERROR;
+			} else if (enabledCount <= 1 || process->sessions > 0) {
 				removeProcessFromList(process, enabledProcesses);
 				addProcessToList(process, disablingProcesses);
 				disableWaitlist.push_back(DisableWaiter(process, callback));
@@ -971,24 +1164,104 @@ public:
 		}
 	}
 
+	/**
+	 * Attempts to increase the number of processes by one, while respecting the
+	 * resource limits. That is, this method will ensure that there are at least
+	 * `minProcesses` processes, but no more than `maxProcesses` processes, and no
+	 * more than `pool->max` processes in the entire pool.
+	 */
+	SpawnResult spawn() {
+		assert(isAlive());
+		if (m_spawning) {
+			return SR_IN_PROGRESS;
+		} else if (restarting()) {
+			return SR_ERR_RESTARTING;
+		} else if (processUpperLimitsReached()) {
+			return SR_ERR_GROUP_UPPER_LIMITS_REACHED;
+		} else if (poolAtFullCapacity()) {
+			return SR_ERR_POOL_AT_FULL_CAPACITY;
+		} else {
+			P_DEBUG("Requested spawning of new process for group " << name);
+			interruptableThreads.create_thread(
+				boost::bind(&Group::spawnThreadMain,
+					this, shared_from_this(), spawner,
+					options.copyAndPersist().clearPerRequestFields(),
+					restartsInitiated),
+				"Group process spawner: " + name,
+				POOL_HELPER_THREAD_STACK_SIZE);
+			m_spawning = true;
+			processesBeingSpawned++;
+			return SR_OK;
+		}
+	}
+
 	void cleanupSpawner(vector<Callback> &postLockActions) {
 		assert(isAlive());
 		postLockActions.push_back(boost::bind(doCleanupSpawner, spawner));
 	}
 
-	unsigned int utilization() const {
-		int result = enabledCount;
-		if (spawning()) {
-			result++;
-		}
-		return result;
+	void restart(const Options &options, RestartMethod method = RM_DEFAULT);
+
+
+	/********************************************
+	 * Queries
+	 ********************************************/
+
+	unsigned int getProcessCount() const {
+		return enabledCount + disablingCount + disabledCount;
 	}
-	
+
+	/**
+	 * Returns the number of processes in this group that should be part of the
+	 * ApplicationPool process limits calculations.
+	 */
+	unsigned int capacityUsed() const {
+		return enabledCount + disablingCount + disabledCount + processesBeingSpawned;
+	}
+
+	/**
+	 * Returns whether the lower bound of the group-specific process limits
+	 * have been satisfied. Note that even if the result is false, the pool limits
+	 * may not allow spawning, so you should check `pool->atFullCapacity()` too.
+	 */
+	bool processLowerLimitsSatisfied() const {
+		return capacityUsed() >= options.minProcesses;
+	}
+
+	/**
+	 * Returns whether the upper bound of the group-specific process limits have
+	 * been reached, or surpassed. Does not check whether pool limits have been
+	 * reached. Use `pool->atFullCapacity()` to check for that.
+	 */
+	bool processUpperLimitsReached() const {
+		return options.maxProcesses != 0 && capacityUsed() >= options.maxProcesses;
+	}
+
+	/**
+	 * Returns whether all enabled processes are totally busy. If so, another
+	 * process should be spawned, if allowed by the process limits.
+	 * Returns false if there are no enabled processes.
+	 */
+	bool allEnabledProcessesAreTotallyBusy() const {
+		return enabledCount > 0 && pqueue.top()->isTotallyBusy();
+	}
+
+	/**
+	 * Checks whether this group is waiting for capacity on the pool to
+	 * become available before it can continue processing requests.
+	 */
+	bool isWaitingForCapacity() const {
+		return enabledProcesses.empty()
+			&& processesBeingSpawned == 0
+			&& !m_restarting
+			&& !getWaitlist.empty();
+	}
+
 	bool garbageCollectable(unsigned long long now = 0) const {
 		/* if (now == 0) {
 			now = SystemTime::getUsec();
 		}
-		return utilization() == 0
+		return busyness() == 0
 			&& getWaitlist.empty()
 			&& disabledProcesses.empty()
 			&& options.getMaxPreloaderIdleTime() != 0
@@ -1003,24 +1276,15 @@ public:
 	 * specific case that another get action is to be performed.
 	 */
 	bool shouldSpawnForGetAction() const;
-	
-	/** Start spawning a new process in the background, in case this
-	 * isn't already happening and the group isn't being restarted.
-	 * Will ensure that at least options.minProcesses processes are spawned.
+
+	/**
+	 * Whether a new process is allowed to be spawned for this group,
+	 * i.e. whether the upper processes limits have not been reached.
 	 */
-	void spawn() {
-		assert(isAlive());
-		if (!spawning() && !restarting()) {
-			P_DEBUG("Requested spawning of new process for group " << name);
-			interruptableThreads.create_thread(
-				boost::bind(&Group::spawnThreadMain,
-					this, shared_from_this(), spawner,
-					options.copyAndPersist().clearPerRequestFields(),
-					restartsInitiated),
-				"Group process spawner: " + name,
-				POOL_HELPER_THREAD_STACK_SIZE);
-			m_spawning = true;
-		}
+	bool allowSpawn() const {
+		return isAlive()
+			&& !processUpperLimitsReached()
+			&& !poolAtFullCapacity();
 	}
 	
 	bool needsRestart(const Options &options) {
@@ -1032,26 +1296,13 @@ public:
 			       fileChangeChecker.changed(restartFile, options.statThrottleRate);
 		}
 	}
-	
-	void restart(const Options &options);
-	
+
 	bool spawning() const {
 		return m_spawning;
 	}
 
 	bool restarting() const {
 		return m_restarting;
-	}
-
-	/**
-	 * Checks whether this group is waiting for capacity on the pool to
-	 * become available before it can continue processing requests.
-	 */
-	bool isWaitingForCapacity() const {
-		return enabledProcesses.empty()
-			&& !m_spawning
-			&& !m_restarting
-			&& !getWaitlist.empty();
 	}
 
 	template<typename Stream>
@@ -1066,10 +1317,11 @@ public:
 		stream << "<enabled_process_count>" << enabledCount << "</enabled_process_count>";
 		stream << "<disabling_process_count>" << disablingCount << "</disabling_process_count>";
 		stream << "<disabled_process_count>" << disabledCount << "</disabled_process_count>";
-		stream << "<utilization>" << utilization() << "</utilization>";
+		stream << "<capacity_used>" << capacityUsed() << "</capacity_used>";
 		stream << "<get_wait_list_size>" << getWaitlist.size() << "</get_wait_list_size>";
 		stream << "<disable_wait_list_size>" << disableWaitlist.size() << "</disable_wait_list_size>";
-		if (spawning()) {
+		stream << "<processes_being_spawned>" << processesBeingSpawned << "</processes_being_spawned>";
+		if (m_spawning) {
 			stream << "<spawning/>";
 		}
 		if (restarting()) {
@@ -1080,17 +1332,21 @@ public:
 		}
 		switch (lifeStatus) {
 		case ALIVE:
-			stream << "<life_status>alive</life_status>";
+			stream << "<life_status>ALIVE</life_status>";
 			break;
 		case SHUTTING_DOWN:
-			stream << "<life_status>shutting_down</life_status>";
+			stream << "<life_status>SHUTTING_DOWN</life_status>";
 			break;
 		case SHUT_DOWN:
-			stream << "<life_status>shut_down</life_status>";
+			stream << "<life_status>SHUT_DOWN</life_status>";
 			break;
 		default:
 			P_BUG("Unknown 'lifeStatus' state " << (int) lifeStatus);
 		}
+
+		stream << "<options>";
+		options.toXml(stream, getResourceLocator());
+		stream << "</options>";
 
 		stream << "<processes>";
 		

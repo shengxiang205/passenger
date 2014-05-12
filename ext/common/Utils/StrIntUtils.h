@@ -28,13 +28,45 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <stdexcept>
+#include <new>
+#include <cstdlib>
 #include <cstddef>
 #include <ctime>
+#include <oxt/macros.hpp>
 #include <StaticString.h>
 
 namespace Passenger {
 
 using namespace std;
+
+
+/**
+ * A RAII construct for memory buffers that are dynamically allocated with malloc().
+ * Upon destruction of a DynamicBuffer, the memory buffer is freed.
+ */
+struct DynamicBuffer {
+	typedef string::size_type size_type;
+
+	char *data;
+	size_type size;
+
+	/**
+	 * @throws std::bad_alloc The buffer cannot be allocated.
+	 */
+	DynamicBuffer(size_type _size)
+		: size(_size)
+	{
+		data = (char *) malloc(_size);
+		if (data == NULL) {
+			throw std::bad_alloc();
+		}
+	}
+
+	~DynamicBuffer() throw() {
+		free(data);
+	}
+};
 
 
 /**
@@ -74,8 +106,12 @@ bool startsWith(const StaticString &str, const StaticString &substr);
  * @param sep The separator to use.
  * @param output The vector to write the output to.
  */
-void split(const StaticString &str, char sep, vector<string> &output);
-void split(const StaticString &str, char sep, vector<StaticString> &output);
+void split(const StaticString & restrict_ref str,
+	char sep,
+	vector<string> & restrict_ref output);
+void split(const StaticString & restrict_ref str,
+	char sep,
+	vector<StaticString> & restrict_ref output);
 
 /**
  * Split the given string using the given separator. Includes the
@@ -85,14 +121,28 @@ void split(const StaticString &str, char sep, vector<StaticString> &output);
  * @param sep The separator to use.
  * @param output The vector to write the output to.
  */
-void splitIncludeSep(const StaticString &str, char sep, vector<string> &output);
-void splitIncludeSep(const StaticString &str, char sep, vector<StaticString> &output);
+void splitIncludeSep(const StaticString & restrict_ref str,
+	char sep,
+	vector<string> & restrict_ref output);
+void splitIncludeSep(const StaticString & restrict_ref str,
+	char sep,
+	vector<StaticString> & restrict_ref output);
 
 /**
  * Look for 'toFind' inside 'str', replace it with 'replaceWith' and return the result.
  * Only the first occurence of 'toFind' is replaced.
  */
 string replaceString(const string &str, const string &toFind, const string &replaceWith);
+
+/**
+ * Like replaceString(), but replace all occurrences of `toFind`.
+ */
+string replaceAll(const string &str, const string &toFind, const string &replaceWith);
+
+/**
+ * Strips leading and trailing whitespaces.
+ */
+string strip(const StaticString &str);
 
 /**
  * Convert anything to a string.
@@ -141,41 +191,58 @@ string toHex(const StaticString &data);
  * Convert the given binary data to hexadecimal. This form accepts an
  * output buffer which must be at least <tt>data.size() * 2</tt> bytes large.
  */
-void toHex(const StaticString &data, char *output, bool upperCase = false);
+void toHex(const StaticString & restrict_ref data, char * restrict output, bool upperCase = false);
+
+/**
+ * Reverse a string in-place.
+ */
+inline void
+reverseString(char *str, unsigned int size) {
+	char *end = str + size;
+	for (--end; str < end; str++, end--) {
+		*str = *str ^ *end,
+		*end = *str ^ *end,
+		*str = *str ^ *end;
+	}
+}
 
 /**
  * Convert the given integer to some other radix, placing
- * the result into the given output buffer. This buffer must be at
- * least <tt>2 * sizeof(IntegerType) + 1</tt> bytes. The output buffer
+ * the result into the given output buffer. The output buffer
  * will be NULL terminated. Supported radices are 2-36.
- *
+ * 
+ * @param outputSize The size of the output buffer, including space for
+ *                   the terminating NULL.
  * @return The size of the created string, excluding
  *         terminating NULL.
+ * @throws std::length_error The output buffer is not large enough.
  */
 template<typename IntegerType, int radix>
 unsigned int
-integerToOtherBase(IntegerType value, char *output) {
-	static const char hex_chars[] = {
+integerToOtherBase(IntegerType value, char *output, unsigned int outputSize) {
+	static const char chars[] = {
 		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
 		'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
 		'u', 'v', 'w', 'x', 'y', 'z'
 	};
-	char buf[sizeof(value) * 2];
 	IntegerType remainder = value;
 	unsigned int size = 0;
 	
 	do {
-		buf[size] = hex_chars[remainder % radix];
+		output[size] = chars[remainder % radix];
 		remainder = remainder / radix;
 		size++;
-	} while (remainder != 0);
+	} while (remainder != 0 && size < outputSize - 1);
 	
-	for (unsigned int i = 0; i < size; i++) {
-		output[size - i - 1] = buf[i];
+	if (remainder == 0) {
+		reverseString(output, size);
+		output[size] = '\0';
+		return size;
+	} else {
+		throw std::length_error("Buffer not large enough to for integerToOtherBase()");
+		return -1; // Shut up compiler warning.
 	}
-	output[size] = '\0';
-	return size;
 }
 
 /**
@@ -190,7 +257,7 @@ integerToOtherBase(IntegerType value, char *output) {
 template<typename IntegerType>
 unsigned int
 integerToHex(IntegerType value, char *output) {
-	return integerToOtherBase<IntegerType, 16>(value, output);
+	return integerToOtherBase<IntegerType, 16>(value, output, 2 * sizeof(IntegerType) + 1);
 }
 
 /**
@@ -210,13 +277,18 @@ string integerToHex(long long value);
 template<typename IntegerType>
 unsigned int
 integerToHexatri(IntegerType value, char *output) {
-	return integerToOtherBase<IntegerType, 36>(value, output);
+	return integerToOtherBase<IntegerType, 36>(value, output, 2 * sizeof(IntegerType) + 1);
 }
 
 /**
  * Convert the given integer to a hexatridecimal string.
  */
 string integerToHexatri(long long value);
+
+/**
+ * Checks whether the given string looks like a number >= 0.
+ */
+bool looksLikePositiveNumber(const StaticString &str);
 
 /**
  * Converts the given string to an integer.

@@ -34,8 +34,10 @@ else
 	require 'build/oxt_tests'
 	require 'build/cxx_tests'
 	require 'build/ruby_tests'
+	require 'build/node_tests'
 	require 'build/integration_tests'
 	require 'build/misc'
+	require 'build/debian'
 	require 'build/rpm'
 end
 
@@ -48,9 +50,10 @@ task :default do
 end
 
 desc "Remove compiled files"
-task :clean do
-	sh "rm -rf build/cache"
-	sh "rm -rf libout"
+task :clean => 'clean:cache'
+task 'common:clean' => 'clean:cache'
+task 'clean:cache' do
+	sh "rm -rf #{OUTPUT_DIR}cache"
 end
 
 desc "Remove all generated files"

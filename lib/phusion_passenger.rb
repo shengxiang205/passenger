@@ -1,6 +1,6 @@
 # encoding: utf-8
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010-2013 Phusion
+#  Copyright (c) 2010-2014 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -26,24 +26,28 @@ module PhusionPassenger
 	FILE_LOCATION = File.expand_path(__FILE__)
 	
 	
-	###### Version numbers ######
+	###### Names and version numbers ######
 	
 	PACKAGE_NAME = 'passenger'
+	# Run 'rake ext/common/Constants.h' after changing this number.
+	VERSION_STRING = '4.0.43'
 	
-	# Phusion Passenger version number. Don't forget to edit ext/common/Constants.h too.
-	VERSION_STRING = '3.9.4.rc2'
-	
-	PREFERRED_NGINX_VERSION = '1.2.7'
-	PREFERRED_PCRE_VERSION  = '8.31'
+	PREFERRED_NGINX_VERSION = '1.6.0'
+	NGINX_SHA256_CHECKSUM = '943ad757a1c3e8b3df2d5c4ddacc508861922e36fa10ea6f8e3a348fc9abfc1a'
+
+	PREFERRED_PCRE_VERSION  = '8.34'
+	PCRE_SHA256_CHECKSUM = '1dd78994c81e44ac41cf30b2a21d4b4cc6d76ccde7fc6e77713ed51d7bddca47'
+
 	STANDALONE_INTERFACE_VERSION  = 1
 	
 	
 	###### Directories ######
 	
-	GLOBAL_NAMESPACE_DIRNAME            = "phusion-passenger"
-	GLOBAL_STANDALONE_NAMESPACE_DIRNAME = "passenger-standalone"
+	GLOBAL_NAMESPACE_DIRNAME            = "passenger"
 	# Subdirectory under $HOME to use for storing stuff.
 	USER_NAMESPACE_DIRNAME              = ".passenger"
+	# The name for the /etc/apache2/mods-available/*.{load,conf} file.
+	APACHE2_MODULE_CONF_NAME            = "passenger"
 	
 	# Directories in which to look for plugins.
 	PLUGIN_DIRS = [
@@ -52,20 +56,43 @@ module PhusionPassenger
 		"~/#{USER_NAMESPACE_DIRNAME}/plugins"
 	]
 	
-	# Directory under $HOME for storing Phusion Passenger Standalone runtime files.
-	LOCAL_STANDALONE_RESOURCE_DIR  = File.join(USER_NAMESPACE_DIRNAME, "standalone")
-	
-	# System-wide directory for storing Phusion Passenger Standalone runtime files.
-	GLOBAL_STANDALONE_RESOURCE_DIR = "/var/lib/#{GLOBAL_STANDALONE_NAMESPACE_DIRNAME}".freeze
-	
-	NATIVELY_PACKAGED_BIN_DIR                = "/usr/bin".freeze
-	NATIVELY_PACKAGED_AGENTS_DIR             = "/usr/lib/#{GLOBAL_NAMESPACE_DIRNAME}/agents".freeze
-	NATIVELY_PACKAGED_HELPER_SCRIPTS_DIR     = "/usr/share/#{GLOBAL_NAMESPACE_DIRNAME}/helper-scripts".freeze
-	NATIVELY_PACKAGED_RESOURCES_DIR          = "/usr/share/#{GLOBAL_NAMESPACE_DIRNAME}".freeze
-	NATIVELY_PACKAGED_DOC_DIR                = "/usr/share/doc/#{GLOBAL_NAMESPACE_DIRNAME}".freeze
-	NATIVELY_PACKAGED_RUNTIME_LIBDIR         = "/usr/lib/#{GLOBAL_NAMESPACE_DIRNAME}".freeze
-	NATIVELY_PACKAGED_HEADER_DIR             = "/usr/include/#{GLOBAL_NAMESPACE_DIRNAME}".freeze
-	NATIVELY_PACKAGED_APACHE2_MODULE         = "/usr/lib/apache2/modules/mod_passenger.so".freeze
+	REQUIRED_LOCATIONS_INI_FIELDS = [
+		:bin_dir,
+		:agents_dir,
+		:lib_dir,
+		:helper_scripts_dir,
+		:resources_dir,
+		:include_dir,
+		:doc_dir,
+		:ruby_libdir,
+		:node_libdir,
+		:apache2_module_path,
+		:ruby_extension_source_dir,
+		:nginx_module_source_dir
+	].freeze
+	OPTIONAL_LOCATIONS_INI_FIELDS = [
+		# Directory in which downloaded Phusion Passenger binaries are stored.
+		# Only available when originally packaged.
+		:download_cache_dir,
+		# Directory which contains the main Phusion Passenger Rakefile. Only
+		# available when originally packaged,
+		:build_system_dir,
+		# Directory in which the build system's output is stored, e.g.
+		# the compiled agent executables. Only available when originally
+		# packaged.
+		:buildout_dir,
+		# Directory in which we can run 'rake apache2'. Used by
+		# passenger-install-apache2-module. Rake will save the Apache module
+		# to `apache2_module_path`.
+		:apache2_module_source_dir
+	].freeze
+	# The subset of the optional fields which are only available when
+	# originally packaged.
+	ORIGINALLY_PACKAGED_LOCATIONS_INI_FIELDS = [
+		:download_cache_dir,
+		:build_system_dir,
+		:buildout_dir
+	].freeze
 	
 	# Follows the logic of ext/common/ResourceLocator.h, so don't forget to modify that too.
 	def self.locate_directories(source_root_or_location_configuration_file = nil)
@@ -74,40 +101,45 @@ module PhusionPassenger
 		
 		if root_or_file && File.file?(root_or_file)
 			filename = root_or_file
-			options  = {}
-			in_locations_section = false
-			File.open(filename, 'r') do |f|
-				while !f.eof?
-					line = f.readline
-					line.strip!
-					next if line.empty?
-					if line =~ /\A\[(.+)\]\Z/
-						in_locations_section = $1 == 'locations'
-					elsif in_locations_section && line =~ /=/
-						key, value = line.split(/ *= */, 2)
-						options[key.freeze] = value.freeze
-					end
+			options  = parse_ini_file(filename)
+			
+			@natively_packaged = get_bool_option(filename, options, 'natively_packaged')
+			REQUIRED_LOCATIONS_INI_FIELDS.each do |field|
+				instance_variable_set("@#{field}", get_option(filename, options, field.to_s).freeze)
+			end
+			OPTIONAL_LOCATIONS_INI_FIELDS.each do |field|
+				instance_variable_set("@#{field}", get_option(filename, options, field.to_s, false).freeze)
+			end
+			if natively_packaged?
+				@native_packaging_method = get_option(filename, options, 'native_packaging_method')
+				ORIGINALLY_PACKAGED_LOCATIONS_INI_FIELDS.each do |field|
+					instance_variable_set("@#{field}", nil)
 				end
 			end
-			
-			@natively_packaged     = get_bool_option(filename, options, 'natively_packaged')
-			@bin_dir               = get_option(filename, options, 'bin').freeze
-			@agents_dir            = get_option(filename, options, 'agents').freeze
-			@helper_scripts_dir    = get_option(filename, options, 'helper_scripts').freeze
-			@resources_dir         = get_option(filename, options, 'resources').freeze
-			@doc_dir               = get_option(filename, options, 'doc').freeze
-			@apache2_module_path   = get_option(filename, options, 'apache2_module').freeze
-			@ruby_extension_source_dir = get_option(filename, options, 'ruby_extension_source').freeze
 		else
 			@source_root           = File.dirname(File.dirname(FILE_LOCATION))
 			@natively_packaged     = false
 			@bin_dir               = "#{@source_root}/bin".freeze
-			@agents_dir            = "#{@source_root}/agents".freeze
+			@agents_dir            = "#{@source_root}/buildout/agents".freeze
+			@lib_dir               = "#{@source_root}/buildout".freeze
 			@helper_scripts_dir    = "#{@source_root}/helper-scripts".freeze
 			@resources_dir         = "#{@source_root}/resources".freeze
+			@include_dir           = "#{@source_root}/ext".freeze
 			@doc_dir               = "#{@source_root}/doc".freeze
-			@apache2_module_path   = "#{@source_root}/libout/apache2/mod_passenger.so".freeze
-			@ruby_extension_source_dir = "#{@source_root}/ext/ruby"
+			@ruby_libdir           = File.dirname(FILE_LOCATION).freeze
+			@node_libdir           = "#{@source_root}/node_lib".freeze
+			@apache2_module_path   = "#{@source_root}/buildout/apache2/mod_passenger.so".freeze
+			@ruby_extension_source_dir = "#{@source_root}/ext/ruby".freeze
+			@nginx_module_source_dir   = "#{@source_root}/ext/nginx".freeze
+			@download_cache_dir        = "#{@source_root}/download_cache".freeze
+			@build_system_dir          = @source_root.dup.freeze
+			@buildout_dir              = "#{@source_root}/buildout".freeze
+			@apache2_module_source_dir = @source_root.dup.freeze
+			REQUIRED_LOCATIONS_INI_FIELDS.each do |field|
+				if instance_variable_get("@#{field}").nil?
+					raise "BUG: @#{field} not set"
+				end
+			end
 		end
 	end
 	
@@ -121,53 +153,84 @@ module PhusionPassenger
 		return @natively_packaged
 	end
 
+	# If Phusion Passenger is natively packaged, returns which packaging
+	# method was used. Can be 'deb', 'rpm' or 'homebrew'.
+	def self.native_packaging_method
+		return @native_packaging_method
+	end
+
+	# Whether the current Phusion Passenger installation is installed
+	# from a release package, e.g. an official gem or official tarball.
+	# Retruns false if e.g. the gem was built by the user, or if this
+	# install is from a git repository.
+	def self.installed_from_release_package?
+		File.exist?("#{resources_dir}/release.txt")
+	end
+
 	# When originally packaged, returns the source root.
 	# When natively packaged, returns the location of the location configuration file.
 	def self.source_root
 		return @source_root
 	end
-	
-	def self.bin_dir
-		return @bin_dir
+
+	# Generate getters for the directory types in locations.ini.
+	getters_code = ""
+	(REQUIRED_LOCATIONS_INI_FIELDS + OPTIONAL_LOCATIONS_INI_FIELDS).each do |field|
+		getters_code << %Q{
+			def self.#{field}
+				return @#{field}
+			end
+		}
 	end
-	
-	def self.agents_dir
-		return @agents_dir
-	end
-	
-	def self.helper_scripts_dir
-		return @helper_scripts_dir
-	end
-	
-	def self.resources_dir
-		return @resources_dir
-	end
-	
-	def self.doc_dir
-		return @doc_dir
-	end
-	
-	def self.ruby_libdir
-		@libdir ||= File.dirname(FILE_LOCATION)
-	end
-	
-	def self.apache2_module_path
-		return @apache2_module_path
+	eval(getters_code, binding, __FILE__, __LINE__)
+
+	def self.index_doc_path
+		return "#{doc_dir}/#{INDEX_DOC_NAME}"
 	end
 
-	def self.ruby_extension_source_dir
-		return @ruby_extension_source_dir
+	def self.apache2_doc_path
+		return "#{doc_dir}/#{APACHE2_DOC_NAME}"
+	end
+
+	def self.nginx_doc_path
+		return "#{doc_dir}/#{NGINX_DOC_NAME}"
+	end
+
+	def self.standalone_doc_path
+		return "#{doc_dir}/#{STANDALONE_DOC_NAME}"
 	end
 	
 	
 	###### Other resource locations ######
 	
-	STANDALONE_BINARIES_URL_ROOT  = "http://standalone-binaries.modrails.com"
+	INDEX_DOC_NAME      = "Users guide.html"
+	APACHE2_DOC_NAME    = "Users guide Apache.html"
+	NGINX_DOC_NAME      = "Users guide Nginx.html"
+	STANDALONE_DOC_NAME = "Users guide Standalone.html"
+
+	def self.binaries_sites
+		return [
+			{ :url => "https://oss-binaries.phusionpassenger.com/binaries/passenger/by_release",
+			  :cacert => "#{resources_dir}/oss-binaries.phusionpassenger.com.crt" },
+			{ :url => "https://s3.amazonaws.com/phusion-passenger/binaries/passenger/by_release" }
+		]
+	end
 	
 	
-	if !$LOAD_PATH.include?(ruby_libdir)
-		$LOAD_PATH.unshift(ruby_libdir)
-		$LOAD_PATH.uniq!
+	# Instead of calling `require 'phusion_passenger/foo'`, you should call
+	# `PhusionPassenger.require_passenger_lib 'foo'`. This is because when Phusion
+	# Passenger is natively packaged, it may still be run with arbitrary Ruby
+	# interpreters. Adding ruby_libdir to $LOAD_PATH is then dangerous because ruby_libdir
+	# may be the distribution's Ruby's vendor_ruby directory, which may be incompatible
+	# with the active Ruby interpreter. This method looks up the exact filename directly.
+	# 
+	# Using this method also has two more advantages:
+	# 
+	#  1. It is immune to Bundler's load path mangling code.
+	#  2. It is faster than plan require() because it doesn't need to
+	#     scan the entire load path.
+	def self.require_passenger_lib(name)
+		require("#{ruby_libdir}/phusion_passenger/#{name}")
 	end
 
 
@@ -187,7 +250,7 @@ private
 			home_dir = ENV['HOME']
 		end
 		if home_dir && !home_dir.empty?
-			filename = "#{home_dir}/.passenger/locations.ini"
+			filename = "#{home_dir}/#{USER_NAMESPACE_DIRNAME}/locations.ini"
 			return filename if File.exist?(filename)
 		end
 
@@ -195,6 +258,25 @@ private
 		return filename if File.exist?(filename)
 
 		return nil
+	end
+
+	def self.parse_ini_file(filename)
+		options  = {}
+		in_locations_section = false
+		File.open(filename, 'r') do |f|
+			while !f.eof?
+				line = f.readline
+				line.strip!
+				next if line.empty?
+				if line =~ /\A\[(.+)\]\Z/
+					in_locations_section = $1 == 'locations'
+				elsif in_locations_section && line =~ /=/
+					key, value = line.split(/ *= */, 2)
+					options[key.freeze] = value.freeze
+				end
+			end
+		end
+		return options
 	end
 
 	def self.get_option(filename, options, key, required = true)

@@ -1,9 +1,9 @@
 # encoding: utf-8
-require 'phusion_passenger/platform_info/ruby'
-require 'phusion_passenger/platform_info/linux'
-require 'phusion_passenger/platform_info/compiler'
-require 'phusion_passenger/platform_info/operating_system'
-require 'phusion_passenger/utils/ansi_colors'
+PhusionPassenger.require_passenger_lib 'platform_info/ruby'
+PhusionPassenger.require_passenger_lib 'platform_info/linux'
+PhusionPassenger.require_passenger_lib 'platform_info/compiler'
+PhusionPassenger.require_passenger_lib 'platform_info/operating_system'
+PhusionPassenger.require_passenger_lib 'utils/ansi_colors'
 
 module PhusionPassenger
 module PlatformInfo
@@ -124,8 +124,8 @@ module Depcheck
 			@checker = block
 		end
 
-		def check_for_command(name)
-			result = find_command(name)
+		def check_for_command(name, *args)
+			result = find_command(name, *args)
 			if result
 				{ :found => true,
 				  "Location" => result }
@@ -243,8 +243,12 @@ module Depcheck
 			install_instructions("Please install it with <b>urpmi #{package_name}</b>")
 		end
 
-		def yum_install(package_name)
-			install_instructions("Please install it with <b>yum install #{package_name}</b>")
+		def yum_install(package_name, options = {})
+			if options[:epel]
+				install_instructions("Please enable <b>EPEL</b>, then install with <b>yum install #{package_name}</b>")
+			else
+				install_instructions("Please install it with <b>yum install #{package_name}</b>")
+			end
 		end
 
 		def emerge(package_name)
@@ -253,12 +257,18 @@ module Depcheck
 
 		def gem_install(package_name)
 			install_instructions("Please make sure RubyGems is installed, then run " +
-				"<b>#{gem_command || 'gem'} install #{package_name}</b>")
+				"<b>#{gem_command} install #{package_name}</b>")
 		end
 
-		def xcode_install(component)
-			install_instructions("Please install <b>Xcode</b>, then in Xcode go to " +
-				"<b>Preferences -> Downloads -> Components</b> and install <b>#{component}</b>")
+		def install_osx_command_line_tools
+			PhusionPassenger.require_passenger_lib 'platform_info/compiler'
+			if PlatformInfo.xcode_select_version.to_s >= "2333"
+				install_instructions "Please install the Xcode command line tools: " +
+					"<b>sudo xcode-select --install</b>"
+			else
+				install_instructions "Please install Xcode, then install the command line tools " +
+					"though the menu <b>Xcode -> Preferences -> Downloads -> Components</b>"
+			end
 		end
 
 
@@ -267,11 +277,11 @@ module Depcheck
 		end
 
 		def gem_command
-			PlatformInfo.gem_command
+			PlatformInfo.gem_command(:sudo => true) || 'gem'
 		end
 
-		def find_command(command)
-			PlatformInfo.find_command(command)
+		def find_command(command, *args)
+			PlatformInfo.find_command(command, *args)
 		end
 
 		def linux_distro_tags

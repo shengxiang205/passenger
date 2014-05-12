@@ -22,12 +22,12 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
-require 'phusion_passenger/classic_rails/cgi_fixed'
+PhusionPassenger.require_passenger_lib 'classic_rails/cgi_fixed'
 module PhusionPassenger
 module ClassicRails
 
 module ThreadHandlerExtension
-	def process_request(env, connection, full_http_response)
+	def process_request(env, connection, socket_wrapper, full_http_response)
 		cgi = CGIFixed.new(env, connection, connection)
 		::Dispatcher.dispatch(cgi,
 			::ActionController::CgiRequest::DEFAULT_SESSION_OPTIONS,

@@ -21,17 +21,19 @@ namespace tut {
 			bg.start();
 			PipeWatcher::onData = PipeWatcher::DataCallback();
 			gatherOutput = boost::bind(&ApplicationPool2_DirectSpawnerTest::_gatherOutput, this, _1, _2);
+			setLogLevel(LVL_ERROR); // TODO: change to LVL_WARN
+			setPrintAppOutputAsDebuggingMessages(true);
 		}
 
 		~ApplicationPool2_DirectSpawnerTest() {
-			setLogLevel(0);
+			setLogLevel(DEFAULT_LOG_LEVEL);
+			setPrintAppOutputAsDebuggingMessages(false);
 			unlink("stub/wsgi/passenger_wsgi.pyc");
-			Process::maybeShutdown(process);
 			PipeWatcher::onData = PipeWatcher::DataCallback();
 		}
 		
-		shared_ptr<DirectSpawner> createSpawner(const Options &options) {
-			return make_shared<DirectSpawner>(bg.safe,
+		boost::shared_ptr<DirectSpawner> createSpawner(const Options &options) {
+			return boost::make_shared<DirectSpawner>(bg.safe,
 				*resourceLocator, generation);
 		}
 		
@@ -43,7 +45,7 @@ namespace tut {
 		}
 
 		void _gatherOutput(const char *data, unsigned int size) {
-			lock_guard<boost::mutex> l(gatheredOutputSyncher);
+			boost::lock_guard<boost::mutex> l(gatheredOutputSyncher);
 			gatheredOutput.append(data, size);
 		}
 	};
@@ -58,21 +60,20 @@ namespace tut {
 		// SpawnException error page.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "perl\1" "-e\1" "print STDERR \"hello world\\n\"; sleep(60)";
+		options.startCommand = "perl\t" "-e\t" "print STDERR \"hello world\\n\"; sleep(60)";
 		options.startupFile  = ".";
 		options.startTimeout = 300;
 		
 		DirectSpawner spawner(bg.safe, *resourceLocator, generation);
-		spawner.getConfig()->forwardStderr = false;
 		
 		try {
-			spawner.spawn(options);
+			process = spawner.spawn(options);
+			process->requiresShutdown = false;
 			fail("Timeout expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
 				SpawnException::APP_STARTUP_TIMEOUT);
-			ensure_equals(e.getErrorPage(),
-				"hello world\n");
+			ensure(e.getErrorPage().find("hello world\n") != string::npos);
 		}
 	}
 	
@@ -82,20 +83,39 @@ namespace tut {
 		// as error response instead.
 		Options options = createOptions();
 		options.appRoot      = "stub";
-		options.startCommand = "perl\1" "-e\1" "print STDERR \"hello world\\n\"";
+		options.startCommand = "perl\t" "-e\t" "print STDERR \"hello world\\n\"";
 		options.startupFile  = ".";
 		
 		DirectSpawner spawner(bg.safe, *resourceLocator, generation);
-		spawner.getConfig()->forwardStderr = false;
 		
 		try {
-			spawner.spawn(options);
+			process = spawner.spawn(options);
+			process->requiresShutdown = false;
 			fail("SpawnException expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
-				SpawnException::APP_STARTUP_PROTOCOL_ERROR);
-			ensure_equals(e.getErrorPage(),
-				"hello world\n");
+				SpawnException::APP_STARTUP_ERROR);
+			ensure(e.getErrorPage().find("hello world\n") != string::npos);
 		}
+	}
+
+	TEST_METHOD(82) {
+		SHOW_EXCEPTION_BACKTRACE(
+		// Test that everything works correctly if the app re-execs() itself.
+		// https://code.google.com/p/phusion-passenger/issues/detail?id=842#c19
+		Options options = createOptions();
+		options.appRoot      = "stub/rack";
+		options.startCommand = "ruby\t" "start.rb\t" "--execself";
+		options.startupFile  = "start.rb";
+		SpawnerPtr spawner = createSpawner(options);
+		process = spawner->spawn(options);
+		process->requiresShutdown = false;
+		ensure_equals(process->sockets->size(), 1u);
+		
+		Connection conn = process->sockets->front().checkoutConnection();
+		ScopeGuard guard(boost::bind(checkin, process, &conn));
+		writeExact(conn.fd, "ping\n");
+		ensure_equals(readAll(conn.fd), "pong\n");
+		);
 	}
 }

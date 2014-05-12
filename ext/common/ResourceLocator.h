@@ -25,6 +25,7 @@
 #ifndef _PASSENGER_RESOURCE_LOCATOR_H_
 #define _PASSENGER_RESOURCE_LOCATOR_H_
 
+#include <boost/shared_ptr.hpp>
 #include <string>
 #include <Exceptions.h>
 #include <Utils.h>
@@ -32,6 +33,7 @@
 
 namespace Passenger {
 
+using namespace std;
 using namespace boost;
 
 
@@ -50,6 +52,7 @@ private:
 	string resourcesDir;
 	string docDir;
 	string rubyLibDir;
+	string nodeLibDir;
 	
 	static string getOption(const string &file, const IniFileSectionPtr &section, const string &key) {
 		if (section->hasKey(key)) {
@@ -65,20 +68,22 @@ public:
 		if (getFileType(rootOrFile) == FT_REGULAR) {
 			string file = rootOrFile;
 			IniFileSectionPtr options = IniFile(file).section("locations");
-			binDir              = getOption(file, options, "bin");
-			agentsDir           = getOption(file, options, "agents");
-			helperScriptsDir    = getOption(file, options, "helper_scripts");
-			resourcesDir        = getOption(file, options, "resources");
-			docDir              = getOption(file, options, "doc");
-			rubyLibDir          = getOption(file, options, "rubylib");
+			binDir              = getOption(file, options, "bin_dir");
+			agentsDir           = getOption(file, options, "agents_dir");
+			helperScriptsDir    = getOption(file, options, "helper_scripts_dir");
+			resourcesDir        = getOption(file, options, "resources_dir");
+			docDir              = getOption(file, options, "doc_dir");
+			rubyLibDir          = getOption(file, options, "ruby_libdir");
+			nodeLibDir          = getOption(file, options, "node_libdir");
 		} else {
 			string root = rootOrFile;
 			binDir              = root + "/bin";
-			agentsDir           = root + "/agents";
+			agentsDir           = root + "/buildout/agents";
 			helperScriptsDir    = root + "/helper-scripts";
 			resourcesDir        = root + "/resources";
 			docDir              = root + "/doc";
 			rubyLibDir          = root + "/lib";
+			nodeLibDir          = root + "/node_lib";
 		}
 	}
 	
@@ -94,10 +99,6 @@ public:
 		return helperScriptsDir;
 	}
 	
-	string getSpawnServerFilename() const {
-		return getHelperScriptsDir() + "/passenger-spawn-server";
-	}
-	
 	string getResourcesDir() const {
 		return resourcesDir;
 	}
@@ -110,7 +111,13 @@ public:
 	string getRubyLibDir() const {
 		return rubyLibDir;
 	}
+
+	string getNodeLibDir() const {
+		return nodeLibDir;
+	}
 };
+
+typedef boost::shared_ptr<ResourceLocator> ResourceLocatorPtr;
 
 
 }

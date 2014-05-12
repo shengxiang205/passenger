@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2011, 2012 Phusion
+ *  Copyright (c) 2011-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -27,53 +27,81 @@
 
 #include <sys/types.h>
 #include <string>
+#include <boost/shared_ptr.hpp>
 #include <Utils/VariantMap.h>
-#include <Utils/Base64.h>
 
 namespace Passenger {
 
 using namespace std;
+using namespace boost;
 
 
-struct AgentOptions {
+struct AgentOptions: public VariantMap {
 	pid_t   webServerPid;
+	string  serverInstanceDir;
 	string  tempDir;
 	bool    userSwitching;
 	string  defaultUser;
 	string  defaultGroup;
 	string  passengerRoot;
-	string  rubyCommand;
+	string  defaultRubyCommand;
 	unsigned int generationNumber;
 	unsigned int maxPoolSize;
-	unsigned int maxInstancesPerApp;
 	unsigned int poolIdleTime;
+	string requestSocketFilename;
 	string requestSocketPassword;
-	string messageSocketPassword;
+	string adminSocketAddress;
+	string exitPassword;
 	string loggingAgentAddress;
 	string loggingAgentPassword;
-	string prestartUrls;
+	string adminToolStatusPassword;
+	vector<string> prestartUrls;
+
+	bool testBinary;
+	string requestSocketLink;
 
 	AgentOptions() { }
 
-	AgentOptions(const VariantMap &options) {
-		webServerPid  = options.getPid("web_server_pid");
-		tempDir       = options.get("temp_dir");
-		userSwitching = options.getBool("user_switching");
-		defaultUser   = options.get("default_user");
-		defaultGroup  = options.get("default_group");
-		passengerRoot = options.get("passenger_root");
-		rubyCommand   = options.get("ruby");
-		generationNumber   = options.getInt("generation_number");
+	AgentOptions(const VariantMap &options)
+		: VariantMap(options)
+	{
+		testBinary = options.get("test_binary", false) == "1";
+		if (testBinary) {
+			return;
+		}
+
+		// Required options for which a default is already set by the Watchdog.
+		passengerRoot      = options.get("passenger_root");
+		tempDir            = options.get("temp_dir");
+		userSwitching      = options.getBool("user_switching");
+		defaultRubyCommand = options.get("default_ruby");
+		defaultUser        = options.get("default_user");
+		defaultGroup       = options.get("default_group");
 		maxPoolSize        = options.getInt("max_pool_size");
-		maxInstancesPerApp = options.getInt("max_instances_per_app");
 		poolIdleTime       = options.getInt("pool_idle_time");
-		requestSocketPassword = Base64::decode(options.get("request_socket_password"));
-		messageSocketPassword = Base64::decode(options.get("message_socket_password"));
+
+		// Required options only set by the Watchdog.
+		webServerPid          = options.getPid("web_server_pid");
+		serverInstanceDir     = options.get("server_instance_dir");
+		generationNumber      = options.getInt("generation_number");
+		requestSocketFilename = options.get("request_socket_filename");
+		requestSocketPassword = options.get("request_socket_password");
+		if (requestSocketPassword == "-") {
+			requestSocketPassword = "";
+		}
+		adminSocketAddress    = options.get("helper_agent_admin_socket_address");
+		exitPassword          = options.get("helper_agent_exit_password");
 		loggingAgentAddress   = options.get("logging_agent_address");
 		loggingAgentPassword  = options.get("logging_agent_password");
-		prestartUrls          = options.get("prestart_urls");
+		adminToolStatusPassword = options.get("admin_tool_status_password");
+		
+		// Optional options.
+		prestartUrls          = options.getStrSet("prestart_urls", false);
+		requestSocketLink     = options.get("request_socket_link", false);
 	}
 };
+
+typedef boost::shared_ptr<AgentOptions> AgentOptionsPtr;
 
 
 } // namespace Passenger

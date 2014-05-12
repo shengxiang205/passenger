@@ -22,12 +22,23 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
+## Magic comment: begin bootstrap ##
 source_root = File.expand_path("..", File.dirname(__FILE__))
 $LOAD_PATH.unshift("#{source_root}/lib")
+begin
+	require 'rubygems'
+rescue LoadError
+end
 require 'phusion_passenger'
-PhusionPassenger.locate_directories
+## Magic comment: end bootstrap ##
 
-require 'rubygems' rescue nil
-require 'phusion_passenger/standalone/main'
+PhusionPassenger.locate_directories
+PhusionPassenger.require_passenger_lib 'standalone/main'
+
+STDOUT.sync = STDERR.sync = true
+
+# Fixes https://github.com/phusion/passenger-ruby-heroku-demo/issues/11
+STDOUT.binmode
+STDERR.binmode
 
 PhusionPassenger::Standalone::Main.run!(ARGV)

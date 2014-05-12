@@ -3,9 +3,9 @@
 # and executes the requested start command.
 
 DIR = File.expand_path(File.dirname(__FILE__))
-require "#{DIR}/../../lib/phusion_passenger"
+require File.expand_path("#{DIR}/../../lib/phusion_passenger")
 PhusionPassenger.locate_directories
-require 'phusion_passenger/native_support'
+PhusionPassenger.require_passenger_lib 'native_support'
 require 'socket'
 
 STDOUT.sync = true
@@ -33,7 +33,7 @@ def process_client_command(server, client, command)
 			options[name] = value
 		end
 		
-		command = options["start_command"].split("\1")
+		command = options["start_command"].split("\t")
 		process_title = options["process_title"]
 		process_title = command[0] if !process_title || process_title.empty?
 		command[0] = [command[0], process_title]

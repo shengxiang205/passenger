@@ -41,7 +41,7 @@ using namespace oxt;
 struct BackgroundEventLoopPrivate {
 	oxt::thread *thr;
 	boost::mutex lock;
-	condition_variable cond;
+	boost::condition_variable cond;
 	bool started;
 };
 
@@ -53,7 +53,7 @@ signalBackgroundEventLoopExit(struct ev_loop *loop, ev_async *async, int revents
 
 static void
 startBackgroundLoop(BackgroundEventLoop *bg) {
-	unique_lock<boost::mutex> l(bg->priv->lock);
+	boost::unique_lock<boost::mutex> l(bg->priv->lock);
 	bg->safe->setCurrentThread();
 	bg->priv->started = true;
 	bg->priv->cond.notify_all();
@@ -63,17 +63,7 @@ startBackgroundLoop(BackgroundEventLoop *bg) {
 
 BackgroundEventLoop::BackgroundEventLoop(bool scalable) {
 	TRACE_POINT();
-	loop = ev_loop_new(EVBACKEND_EPOLL);
-	if (loop == NULL) {
-		loop = ev_loop_new(EVBACKEND_KQUEUE);
-	}
-	if (loop == NULL) {
-		loop = ev_loop_new(0);
-	}
-	if (loop == NULL) {
-		throw RuntimeException("Cannot create an event loop");
-	}
-
+	
 	if (scalable) {
 		loop = ev_loop_new(EVBACKEND_KQUEUE);
 		if (loop == NULL) {
@@ -85,11 +75,15 @@ BackgroundEventLoop::BackgroundEventLoop(bool scalable) {
 	} else {
 		loop = ev_loop_new(EVBACKEND_POLL);
 	}
+	if (loop == NULL) {
+		throw RuntimeException("Cannot create an event loop");
+	}
+
 	async = (ev_async *) malloc(sizeof(ev_async));
 	async->data = this;
 	ev_async_init(async, signalBackgroundEventLoopExit);
 	ev_async_start(loop, async);
-	safe = make_shared<SafeLibev>(loop);
+	safe = boost::make_shared<SafeLibev>(loop);
 	priv = new BackgroundEventLoopPrivate();
 	priv->thr = NULL;
 	priv->started = false;
@@ -105,7 +99,7 @@ BackgroundEventLoop::~BackgroundEventLoop() {
 void
 BackgroundEventLoop::start(const string &threadName, unsigned int stackSize) {
 	assert(priv->thr == NULL);
-	unique_lock<boost::mutex> l(priv->lock);
+	boost::unique_lock<boost::mutex> l(priv->lock);
 	priv->thr = new oxt::thread(
 		boost::bind(startBackgroundLoop, this),
 		threadName,
@@ -123,6 +117,11 @@ BackgroundEventLoop::stop() {
 		priv->thr->join();
 		priv->thr = NULL;
 	}
+}
+
+bool
+BackgroundEventLoop::isStarted() const {
+	return priv->thr != NULL;
 }
 
 

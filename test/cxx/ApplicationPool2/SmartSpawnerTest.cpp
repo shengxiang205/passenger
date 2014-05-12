@@ -27,16 +27,17 @@ namespace tut {
 			PipeWatcher::onData = PipeWatcher::DataCallback();
 			gatherOutput = boost::bind(&ApplicationPool2_SmartSpawnerTest::_gatherOutput, this, _1, _2);
 			setLogLevel(LVL_ERROR); // TODO: should be LVL_WARN
+			setPrintAppOutputAsDebuggingMessages(true);
 		}
 		
 		~ApplicationPool2_SmartSpawnerTest() {
-			setLogLevel(0);
+			setLogLevel(DEFAULT_LOG_LEVEL);
+			setPrintAppOutputAsDebuggingMessages(false);
 			unlink("stub/wsgi/passenger_wsgi.pyc");
-			Process::maybeShutdown(process);
 			PipeWatcher::onData = PipeWatcher::DataCallback();
 		}
 		
-		shared_ptr<SmartSpawner> createSpawner(const Options &options, bool exitImmediately = false) {
+		boost::shared_ptr<SmartSpawner> createSpawner(const Options &options, bool exitImmediately = false) {
 			char buf[PATH_MAX + 1];
 			getcwd(buf, PATH_MAX);
 			
@@ -47,7 +48,7 @@ namespace tut {
 				command.push_back("exit-immediately");
 			}
 			
-			return make_shared<SmartSpawner>(bg.safe,
+			return boost::make_shared<SmartSpawner>(bg.safe,
 				*resourceLocator,
 				generation,
 				command,
@@ -62,7 +63,7 @@ namespace tut {
 		}
 
 		void _gatherOutput(const char *data, unsigned int size) {
-			lock_guard<boost::mutex> l(gatheredOutputSyncher);
+			boost::lock_guard<boost::mutex> l(gatheredOutputSyncher);
 			gatheredOutput.append(data, size);
 		}
 	};
@@ -76,10 +77,11 @@ namespace tut {
 		// restart it and try again.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
-		shared_ptr<SmartSpawner> spawner = createSpawner(options);
-		spawner->spawn(options)->shutdown();
+		boost::shared_ptr<SmartSpawner> spawner = createSpawner(options);
+		process = spawner->spawn(options);
+		process->requiresShutdown = false;
 		
 		kill(spawner->getPreloaderPid(), SIGTERM);
 		// Give it some time to exit.
@@ -87,7 +89,8 @@ namespace tut {
 		
 		// No exception at next spawn.
 		setLogLevel(-1);
-		spawner->spawn(options)->shutdown();
+		process = spawner->spawn(options);
+		process->requiresShutdown = false;
 	}
 	
 	TEST_METHOD(81) {
@@ -95,12 +98,13 @@ namespace tut {
 		// SmartSpawner will throw an exception.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		setLogLevel(-1);
-		shared_ptr<SmartSpawner> spawner = createSpawner(options, true);
+		boost::shared_ptr<SmartSpawner> spawner = createSpawner(options, true);
 		try {
-			spawner->spawn(options)->shutdown();
+			process = spawner->spawn(options);
+			process->requiresShutdown = false;
 			fail("SpawnException expected");
 		} catch (const SpawnException &) {
 			// Pass.
@@ -113,7 +117,7 @@ namespace tut {
 		// whatever stderr output as error page.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		options.startTimeout = 300;
 		
@@ -126,17 +130,15 @@ namespace tut {
 			generation,
 			preloaderCommand,
 			options);
-		spawner.getConfig()->forwardStdout = false;
-		spawner.getConfig()->forwardStderr = false;
 		
 		try {
-			spawner.spawn(options)->shutdown();
+			process = spawner.spawn(options);
+			process->requiresShutdown = false;
 			fail("SpawnException expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
 				SpawnException::PRELOADER_STARTUP_TIMEOUT);
-			ensure_equals(e.getErrorPage(),
-				"hello world\n");
+			ensure(e.getErrorPage().find("hello world\n") != string::npos);
 		}
 	}
 	
@@ -146,7 +148,7 @@ namespace tut {
 		// as error response instead.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		
 		vector<string> preloaderCommand;
@@ -158,17 +160,15 @@ namespace tut {
 			generation,
 			preloaderCommand,
 			options);
-		spawner.getConfig()->forwardStdout = false;
-		spawner.getConfig()->forwardStderr = false;
 		
 		try {
-			spawner.spawn(options)->shutdown();
+			process = spawner.spawn(options);
+			process->requiresShutdown = false;
 			fail("SpawnException expected");
 		} catch (const SpawnException &e) {
 			ensure_equals(e.getErrorKind(),
-				SpawnException::PRELOADER_STARTUP_PROTOCOL_ERROR);
-			ensure_equals(e.getErrorPage(),
-				"hello world\n");
+				SpawnException::PRELOADER_STARTUP_ERROR);
+			ensure(e.getErrorPage().find("hello world\n") != string::npos);
 		}
 	}
 
@@ -177,7 +177,7 @@ namespace tut {
 		// takes note of the process's environment variables.
 		Options options = createOptions();
 		options.appRoot      = "stub/rack";
-		options.startCommand = "ruby\1" "start.rb";
+		options.startCommand = "ruby\t" "start.rb";
 		options.startupFile  = "start.rb";
 		options.environmentVariables.push_back(make_pair("PASSENGER_FOO", "foo"));
 		
@@ -190,11 +190,10 @@ namespace tut {
 			generation,
 			preloaderCommand,
 			options);
-		spawner.getConfig()->forwardStdout = false;
-		spawner.getConfig()->forwardStderr = false;
 		
 		try {
-			spawner.spawn(options)->shutdown();
+			process = spawner.spawn(options);
+			process->requiresShutdown = false;
 			fail("SpawnException expected");
 		} catch (const SpawnException &e) {
 			ensure(containsSubstring(e["envvars"], "PASSENGER_FOO=foo\n"));
@@ -238,7 +237,7 @@ namespace tut {
 		shutdown(session->fd(), SHUT_WR);
 		readAll(session->fd());
 		EVENTUALLY(2,
-			lock_guard<boost::mutex> l(gatheredOutputSyncher);
+			boost::lock_guard<boost::mutex> l(gatheredOutputSyncher);
 			result = gatheredOutput.find("hello world!\n") != string::npos;
 		);
 	}

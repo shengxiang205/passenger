@@ -2,7 +2,7 @@
  * OXT - OS eXtensions for boosT
  * Provides important functionality necessary for writing robust server software.
  *
- * Copyright (c) 2008-2012 Phusion
+ * Copyright (c) 2008-2013 Phusion
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -64,7 +64,7 @@ static global_context_t *global_context = NULL;
 		/* Do nothing. */
 	}
 	
-	static void
+	void
 	set_thread_local_context(const thread_local_context_ptr &ctx) {
 		local_context = new thread_local_context_ptr(ctx);
 	}
@@ -99,7 +99,7 @@ static global_context_t *global_context = NULL;
 		local_context = new thread_specific_ptr<thread_local_context_ptr>();
 	}
 
-	static void
+	void
 	set_thread_local_context(const thread_local_context_ptr &ctx) {
 		if (local_context != NULL) {
 			local_context->reset(new thread_local_context_ptr(ctx));
@@ -131,9 +131,11 @@ static global_context_t *global_context = NULL;
 
 #ifdef OXT_BACKTRACE_IS_ENABLED
 
-trace_point::trace_point(const char *_function, const char *_source, unsigned int _line)
+trace_point::trace_point(const char *_function, const char *_source, unsigned short _line,
+	const char *_data)
 	: function(_function),
 	  source(_source),
+	  data(_data),
 	  line(_line),
 	  m_detached(false)
 {
@@ -146,9 +148,11 @@ trace_point::trace_point(const char *_function, const char *_source, unsigned in
 	}
 }
 
-trace_point::trace_point(const char *_function, const char *_source, unsigned int _line, bool detached)
+trace_point::trace_point(const char *_function, const char *_source, unsigned short _line,
+	const char *_data, const detached &detached_tag)
 	: function(_function),
 	  source(_source),
+	  data(_data),
 	  line(_line),
 	  m_detached(true)
 { }
@@ -165,7 +169,7 @@ trace_point::~trace_point() {
 }
 
 void
-trace_point::update(const char *source, unsigned int line) {
+trace_point::update(const char *source, unsigned short line) {
 	this->source = source;
 	this->line = line;
 }
@@ -183,7 +187,8 @@ tracable_exception::tracable_exception() {
 				(*it)->function,
 				(*it)->source,
 				(*it)->line,
-				true);
+				(*it)->data,
+				trace_point::detached());
 			backtrace_copy.push_back(p);
 		}
 	}
@@ -199,9 +204,16 @@ tracable_exception::tracable_exception(const tracable_exception &other)
 			(*it)->function,
 			(*it)->source,
 			(*it)->line,
-			true);
+			(*it)->data,
+			trace_point::detached());
 		backtrace_copy.push_back(p);
 	}
+}
+
+tracable_exception::tracable_exception(const no_backtrace &tag)
+	: std::exception()
+{
+	// Do nothing.
 }
 
 tracable_exception::~tracable_exception() throw() {
@@ -233,6 +245,9 @@ format_backtrace(const Collection &backtrace_list) {
 					source = p->source;
 				}
 				result << " (" << source << ":" << p->line << ")";
+				if (p->data != NULL) {
+					result << " -- " << p->data;
+				}
 			}
 			result << endl;
 		}
@@ -262,6 +277,11 @@ void initialize() {
 	ctx->thread_number = 1;
 	ctx->thread_name = "Main thread";
 	set_thread_local_context(ctx);
+
+	ctx->thread = pthread_self();
+	global_context->registered_threads.push_back(ctx);
+	ctx->iterator = global_context->registered_threads.end();
+	ctx->iterator--;
 }
 
 
@@ -298,7 +318,7 @@ thread::make_thread_name(const string &given_name) {
 			stringstream str;
 			str << "Thread #";
 			{
-				lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
+				boost::lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
 				str << global_context->next_thread_number;
 			}
 			return str.str();
@@ -315,7 +335,7 @@ thread::thread_main(const boost::function<void ()> func, thread_local_context_pt
 	set_thread_local_context(ctx);
 
 	if (OXT_LIKELY(global_context != NULL)) {
-		lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
+		boost::lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
 
 		ctx->thread = pthread_self();
 		global_context->next_thread_number++;
@@ -335,7 +355,7 @@ thread::thread_main(const boost::function<void ()> func, thread_local_context_pt
 	// We don't care about other exceptions because they'll crash the process anyway.
 
 	if (OXT_LIKELY(global_context != NULL)) {
-		lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
+		boost::lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
 		thread_local_context *ctx = get_thread_local_context();
 		if (ctx != 0 && ctx->thread_number != 0) {
 			global_context->registered_threads.erase(ctx->iterator);
@@ -364,7 +384,7 @@ string
 thread::all_backtraces() throw() {
 	#ifdef OXT_BACKTRACE_IS_ENABLED
 		if (OXT_LIKELY(global_context != NULL)) {
-			lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
+			boost::lock_guard<boost::mutex> l(global_context->thread_registration_mutex);
 			list<thread_local_context_ptr>::const_iterator it;
 			std::stringstream result;
 			

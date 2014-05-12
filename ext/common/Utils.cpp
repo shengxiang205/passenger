@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010, 2011, 2012 Phusion
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -40,7 +40,12 @@
 #include <dirent.h>
 #include <limits.h>
 #include <unistd.h>
+#include <string.h>
 #include <signal.h>
+#ifdef __linux__
+	#include <sys/syscall.h>
+	#include <features.h>
+#endif
 #include <vector>
 #include <FileDescriptor.h>
 #include <MessageServer.h>
@@ -279,7 +284,6 @@ extractDirName(const StaticString &path) {
 
 StaticString
 extractDirNameStatic(const StaticString &path) {
-	breakpoint();
 	if (path.empty()) {
 		return StaticString(".", 1);
 	}
@@ -387,12 +391,40 @@ getProcessUsername() {
 		result = (struct passwd *) NULL;
 	}
 	
-	if (result == (struct passwd *) NULL) {
+	if (result == (struct passwd *) NULL || result->pw_name == NULL || result->pw_name[0] == '\0') {
 		snprintf(strings, sizeof(strings), "UID %lld", (long long) getuid());
 		strings[sizeof(strings) - 1] = '\0';
 		return strings;
 	} else {
 		return result->pw_name;
+	}
+}
+
+string
+getGroupName(gid_t gid) {
+	struct group *groupEntry;
+
+	groupEntry = getgrgid(gid);
+	if (groupEntry == NULL) {
+		return toString(gid);
+	} else {
+		return groupEntry->gr_name;
+	}
+}
+
+gid_t
+lookupGid(const string &groupName) {
+	struct group *groupEntry;
+
+	groupEntry = getgrnam(groupName.c_str());
+	if (groupEntry == NULL) {
+		if (looksLikePositiveNumber(groupName)) {
+			return atoi(groupName);
+		} else {
+			return (gid_t) -1;
+		}
+	} else {
+		return groupEntry->gr_gid;
 	}
 }
 
@@ -408,7 +440,7 @@ parseModeString(const StaticString &mode) {
 		
 		if (clause.empty()) {
 			continue;
-		} else if (clause.size() < 2 || clause[1] != '=') {
+		} else if (clause.size() < 2 || (clause[0] != '+' && clause[1] != '=')) {
 			throw InvalidModeStringException("Invalid mode clause specification '" + clause + "'");
 		}
 		
@@ -479,6 +511,20 @@ parseModeString(const StaticString &mode) {
 				}
 			}
 			break;
+		case '+':
+			for (string::size_type i = 1; i < clause.size(); i++) {
+				switch (clause[i]) {
+				case 't':
+					modeBits |= S_ISVTX;
+					break;
+				default:
+					throw InvalidModeStringException("Invalid permission '" +
+						string(1, clause[i]) +
+						"' in mode clause specification '" +
+						clause + "'");
+				}
+			}
+			break;
 		default:
 			throw InvalidModeStringException("Invalid owner '" + string(1, clause[0]) +
 				"' in mode clause specification '" + clause + "'");
@@ -494,7 +540,10 @@ absolutizePath(const StaticString &path, const StaticString &workingDir) {
 	if (!startsWith(path, "/")) {
 		if (workingDir.empty()) {
 			char buffer[PATH_MAX];
-			getcwd(buffer, sizeof(buffer));
+			if (getcwd(buffer, sizeof(buffer)) == NULL) {
+				int e = errno;
+				throw SystemException("Unable to query current working directory", e);
+			}
 			split(buffer + 1, '/', components);
 		} else {
 			string absoluteWorkingDir = absolutizePath(workingDir);
@@ -685,29 +734,10 @@ removeDirTree(const string &path) {
 	}
 }
 
-bool
-verifyRailsDir(const string &dir, CachedFileStat *cstat, unsigned int throttleRate) {
-	string temp(dir);
-	temp.append("/config/environment.rb");
-	return fileExists(temp, cstat, throttleRate);
-}
-
-bool
-verifyRackDir(const string &dir, CachedFileStat *cstat, unsigned int throttleRate) {
-	string temp(dir);
-	temp.append("/config.ru");
-	return fileExists(temp, cstat, throttleRate);
-}
-
-bool
-verifyWSGIDir(const string &dir, CachedFileStat *cstat, unsigned int throttleRate) {
-	string temp(dir);
-	temp.append("/passenger_wsgi.py");
-	return fileExists(temp, cstat, throttleRate);
-}
-
 void
-prestartWebApps(const ResourceLocator &locator, const string &serializedprestartURLs) {
+prestartWebApps(const ResourceLocator &locator, const string &ruby,
+	const vector<string> &prestartURLs)
+{
 	/* Apache calls the initialization routines twice during startup, and
 	 * as a result it starts two helper servers, where the first one exits
 	 * after a short idle period. We want any prespawning requests to reach
@@ -718,11 +748,9 @@ prestartWebApps(const ResourceLocator &locator, const string &serializedprestart
 	
 	this_thread::disable_interruption di;
 	this_thread::disable_syscall_interruption dsi;
-	vector<string> prestartURLs;
 	vector<string>::const_iterator it;
 	string prespawnScript = locator.getHelperScriptsDir() + "/prespawn";
 	
-	split(Base64::decode(serializedprestartURLs), '\0', prestartURLs);
 	it = prestartURLs.begin();
 	while (it != prestartURLs.end() && !this_thread::interruption_requested()) {
 		if (it->empty()) {
@@ -743,7 +771,8 @@ prestartWebApps(const ResourceLocator &locator, const string &serializedprestart
 				syscalls::close(i);
 			}
 			
-			execlp(prespawnScript.c_str(),
+			execlp(ruby.c_str(),
+				ruby.c_str(),
 				prespawnScript.c_str(),
 				it->c_str(),
 				(char *) 0);
@@ -775,7 +804,7 @@ prestartWebApps(const ResourceLocator &locator, const string &serializedprestart
 }
 
 void
-runAndPrintExceptions(const function<void ()> &func, bool toAbort) {
+runAndPrintExceptions(const boost::function<void ()> &func, bool toAbort) {
 	try {
 		func();
 	} catch (const boost::thread_interrupted &) {
@@ -789,7 +818,7 @@ runAndPrintExceptions(const function<void ()> &func, bool toAbort) {
 }
 
 void
-runAndPrintExceptions(const function<void ()> &func) {
+runAndPrintExceptions(const boost::function<void ()> &func) {
 	runAndPrintExceptions(func, true);
 }
 
@@ -800,10 +829,11 @@ getHostName() {
 		// https://bugzilla.redhat.com/show_bug.cgi?id=130733
 		hostNameMax = 255;
 	}
-	char hostname[hostNameMax + 1];
-	if (gethostname(hostname, hostNameMax) == 0) {
-		hostname[hostNameMax] = '\0';
-		return hostname;
+
+	string buf(hostNameMax + 1, '\0');
+	if (gethostname(&buf[0], hostNameMax + 1) == 0) {
+		buf[hostNameMax] = '\0';
+		return string(buf.c_str());
 	} else {
 		int e = errno;
 		throw SystemException("Unable to query the system's host name", e);
@@ -858,14 +888,6 @@ getSignalName(int sig) {
 
 void
 resetSignalHandlersAndMask() {
-	sigset_t signal_set;
-	int ret;
-	
-	sigemptyset(&signal_set);
-	do {
-		ret = sigprocmask(SIG_SETMASK, &signal_set, NULL);
-	} while (ret == -1 && errno == EINTR);
-	
 	struct sigaction action;
 	action.sa_handler = SIG_DFL;
 	action.sa_flags   = SA_RESTART;
@@ -896,6 +918,21 @@ resetSignalHandlersAndMask() {
 	#endif
 	sigaction(SIGUSR1, &action, NULL);
 	sigaction(SIGUSR2, &action, NULL);
+
+	// We reset the signal mask after resetting the signal handlers,
+	// because prior to calling resetSignalHandlersAndMask(), the
+	// process might be blocked on some signals. We want those signals
+	// to be processed after installing the new signal handlers
+	// so that bugs like https://github.com/phusion/passenger/pull/97
+	// can be prevented.
+
+	sigset_t signal_set;
+	int ret;
+	
+	sigemptyset(&signal_set);
+	do {
+		ret = sigprocmask(SIG_SETMASK, &signal_set, NULL);
+	} while (ret == -1 && errno == EINTR);
 }
 
 void
@@ -957,6 +994,29 @@ runShellCommand(const StaticString &command) {
 	}
 }
 
+#ifdef __APPLE__
+	// http://www.opensource.apple.com/source/Libc/Libc-825.26/sys/fork.c
+	// This bypasses atfork handlers.
+	extern "C" {
+		extern pid_t __fork(void);
+	}
+#endif
+
+pid_t
+asyncFork() {
+	#if defined(__linux__)
+		#if defined(SYS_fork)
+			return (pid_t) syscall(SYS_fork);
+		#else
+			return syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);
+		#endif
+	#elif defined(__APPLE__)
+		return __fork();
+	#else
+		return fork();
+	#endif
+}
+
 // Async-signal safe way to get the current process's hard file descriptor limit.
 static int
 getFileDescriptorLimit() {
@@ -971,13 +1031,17 @@ getFileDescriptorLimit() {
 	}
 	
 	long result;
-	if (sysconfResult > rlimitResult) {
+	// OS X 10.9 returns LLONG_MAX. It doesn't make sense
+	// to use that result so we limit ourselves to the
+	// sysconf result.
+	if (rlimitResult >= INT_MAX || sysconfResult > rlimitResult) {
 		result = sysconfResult;
 	} else {
 		result = rlimitResult;
 	}
+
 	if (result < 0) {
-		// Both calls returned errors.
+		// Unable to query the file descriptor limit.
 		result = 9999;
 	} else if (result < 2) {
 		// The calls reported broken values.
@@ -1036,7 +1100,7 @@ getHighestFileDescriptor() {
 	}
 	
 	do {
-		pid = fork();
+		pid = asyncFork();
 	} while (pid == -1 && errno == EINTR);
 	
 	if (pid == 0) {

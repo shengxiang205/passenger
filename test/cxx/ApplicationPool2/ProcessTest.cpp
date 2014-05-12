@@ -19,7 +19,7 @@ namespace tut {
 			
 			struct sockaddr_in addr;
 			socklen_t len = sizeof(addr);
-			sockets = make_shared<SocketList>();
+			sockets = boost::make_shared<SocketList>();
 			
 			server1 = createTcpServer("127.0.0.1", 0);
 			getsockname(server1, (struct sockaddr *) &addr, &len);
@@ -48,18 +48,18 @@ namespace tut {
 	
 	TEST_METHOD(1) {
 		// Test initial state.
-		ProcessPtr process = make_shared<Process>(bg.safe,
+		ProcessPtr process = boost::make_shared<Process>(bg.safe,
 			123, "", "", adminSocket[0],
 			errorPipe[0], sockets, 0, 0);
 		process->dummy = true;
 		process->requiresShutdown = false;
-		ensure_equals(process->utilization(), 0);
-		ensure(!process->atFullCapacity());
+		ensure_equals(process->busyness(), 0);
+		ensure(!process->isTotallyBusy());
 	}
 	
 	TEST_METHOD(2) {
 		// Test opening and closing sessions.
-		ProcessPtr process = make_shared<Process>(bg.safe,
+		ProcessPtr process = boost::make_shared<Process>(bg.safe,
 			123, "", "", adminSocket[0],
 			errorPipe[0], sockets, 0, 0);
 		process->dummy = true;
@@ -74,9 +74,9 @@ namespace tut {
 	}
 	
 	TEST_METHOD(3) {
-		// newSession() checks out the socket with the smallest utilization number
-		// and sessionClosed() restores the session utilization statistics.
-		ProcessPtr process = make_shared<Process>(bg.safe,
+		// newSession() checks out the socket with the smallest busyness number
+		// and sessionClosed() restores the session busyness statistics.
+		ProcessPtr process = boost::make_shared<Process>(bg.safe,
 			123, "", "", adminSocket[0],
 			errorPipe[0], sockets, 0, 0);
 		process->dummy = true;
@@ -121,19 +121,19 @@ namespace tut {
 	
 	TEST_METHOD(4) {
 		// If all sockets are at their full capacity then newSession() will fail.
-		ProcessPtr process = make_shared<Process>(bg.safe,
+		ProcessPtr process = boost::make_shared<Process>(bg.safe,
 			123, "", "", adminSocket[0],
 			errorPipe[0], sockets, 0, 0);
 		process->dummy = true;
 		process->requiresShutdown = false;
 		vector<SessionPtr> sessions;
 		for (int i = 0; i < 9; i++) {
-			ensure(!process->atFullCapacity());
+			ensure(!process->isTotallyBusy());
 			SessionPtr session = process->newSession();
 			ensure(session != NULL);
 			sessions.push_back(session);
 		}
-		ensure(process->atFullCapacity());
+		ensure(process->isTotallyBusy());
 		ensure(process->newSession() == NULL);
 	}
 }

@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2011-2013 Phusion
+ *  Copyright (c) 2011-2014 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -39,6 +39,7 @@
 #include <ApplicationPool2/Socket.h>
 #include <ApplicationPool2/Session.h>
 #include <ApplicationPool2/PipeWatcher.h>
+#include <Constants.h>
 #include <FileDescriptor.h>
 #include <SafeLibev.h>
 #include <Logging.h>
@@ -112,33 +113,34 @@ public:
  * ## Life time
  *
  * A Process object lives until the containing Group calls `detach(process)`,
- * which indicates that it wants this Process to should down. This causes
- * the Process to enter the `detached() == true` state. Processes in this
- * state are stored in the `detachedProcesses` collection in the Group and
- * are no longer eligible for receiving requests. They will be removed from
- * the Group and destroyed when all of the following applies:
- * 
- *  1. the OS process is gone.
- *  2. `sessions == 0`
+ * which indicates that it wants this Process to shut down. This causes
+ * `signalDetached()` to be called, which may or may not send a message
+ * to the process. After this, the Process object is stored in the
+ * `detachedProcesses` collection in the Group and are no longer eligible for
+ * receiving requests. Once all requests on this Process have finished,
+ * `triggerShutdown()` will be called, which will send a message to the
+ * process telling it to shut down. Once the process is gone, `cleanup()` is
+ * called, and the Process object is removed from the collection.
  *
  * This means that a Group outlives all its Processes, a Process outlives all
  * its Sessions, and a Process also outlives the OS process.
  */
-class Process: public enable_shared_from_this<Process> {
-private:
+class Process: public boost::enable_shared_from_this<Process> {
+// Actually private, but marked public so that unit tests can access the fields.
+public:
 	friend class Group;
 	
-	/** A mutex to protect access to `m_shutDown`. */
+	/** A mutex to protect access to `lifeStatus`. */
 	mutable boost::mutex lifetimeSyncher;
 
 	/** Group inside the Pool that this Process belongs to.
 	 * Should never be NULL because a Group should outlive all of its Processes.
 	 * Read-only; only set once during initialization.
 	 */
-	weak_ptr<Group> group;
+	boost::weak_ptr<Group> group;
 	
 	/** A subset of 'sockets': all sockets that speak the
-	 * "session" protocol, sorted by socket.utilization(). */
+	 * "session" protocol, sorted by socket.busyness(). */
 	PriorityQueue<Socket> sessionSockets;
 	
 	/** The iterator inside the associated Group's process list. */
@@ -146,13 +148,44 @@ private:
 	/** The handle inside the associated Group's process priority queue. */
 	PriorityQueue<Process>::Handle pqHandle;
 
+	void sendAbortLongRunningConnectionsMessage(const string &address);
+	static void realSendAbortLongRunningConnectionsMessage(string address);
+
+	static bool
+	isZombie(pid_t pid) {
+		string filename = "/proc/" + toString(pid) + "/status";
+		FILE *f = fopen(filename.c_str(), "r");
+		if (f == NULL) {
+			// Don't know.
+			return false;
+		}
+
+		bool result = false;
+		while (!feof(f)) {
+			char buf[512];
+			const char *line;
+
+			line = fgets(buf, sizeof(buf), f);
+			if (line == NULL) {
+				break;
+			}
+			if (strcmp(line, "State:	Z (zombie)\n") == 0) {
+				// Is a zombie.
+				result = true;
+				break;
+			}
+		}
+		fclose(f);
+		return result;
+	}
+
 	void indexSessionSockets() {
 		SocketList::iterator it;
 		concurrency = 0;
 		for (it = sockets->begin(); it != sockets->end(); it++) {
 			Socket *socket = &(*it);
 			if (socket->protocol == "session" || socket->protocol == "http_session") {
-				socket->pqHandle = sessionSockets.push(socket, socket->utilization());
+				socket->pqHandle = sessionSockets.push(socket, socket->busyness());
 				if (concurrency != -1) {
 					if (socket->concurrency == 0) {
 						// If one of the sockets has a concurrency of
@@ -180,13 +213,22 @@ public:
 	SafeLibev * const libev;
 	/** Process PID. */
 	pid_t pid;
-	/** UUID for this process, randomly generated and will never appear again. */
+	/** An ID that uniquely identifies this Process in the Group, for
+	 * use in implementing sticky sessions. Set by Group::attach(). */
+	unsigned int stickySessionId;
+	/** UUID for this process, randomly generated and extremely unlikely to ever
+	 * appear again in this universe. */
 	string gupid;
 	string connectPassword;
 	/** Admin socket, see class description. */
 	FileDescriptor adminSocket;
 	/** The sockets that this Process listens on for connections. */
 	SocketListPtr sockets;
+	/** The code revision of the application, inferred through various means.
+	 * See Spawner::prepareSpawn() to learn how this is determined.
+	 * May be an empty string.
+	 */
+	string codeRevision;
 	/** Time at which the Spawner that created this process was created.
 	 * Microseconds resolution. */
 	unsigned long long spawnerCreationTime;
@@ -200,9 +242,10 @@ public:
 	 * the admin socket need not be closed, etc.
 	 */
 	bool dummy;
-	/** Whether it is required that shutdown() must be called before destroying
-	 * this Process. Normally true, except for dummy Process objects created by
-	 * Pool::asyncGet() with options.noop == true.
+	/** Whether it is required that triggerShutdown() and cleanup() must be called
+	 * before destroying this Process. Normally true, except for dummy Process
+	 * objects created by Pool::asyncGet() with options.noop == true, because those
+	 * processes are never added to Group.enabledProcesses.
 	 */
 	bool requiresShutdown;
 	
@@ -224,19 +267,21 @@ public:
 	int sessions;
 	/** Number of sessions opened so far. */
 	unsigned int processed;
-	/** Do not access directly, always use `isAlive()`/`isShutDown()`/`getLifeStatus()` or
+	/** Do not access directly, always use `isAlive()`/`isDead()`/`getLifeStatus()` or
 	 * through `lifetimeSyncher`. */
 	enum LifeStatus {
 		/** Up and operational. */
 		ALIVE,
-		/** Being shut down. The containing Group has just detached this
-		 * Process and is now waiting for it to be shutdownable.
-		 */
-		SHUTTING_DOWN,
+		/** This process has been detached, and the detached processes checker has
+		 * verified that there are no active sessions left and has told the process
+		 * to shut down. In this state we're supposed to wait until the process
+		 * has actually shutdown, after which cleanup() must be called. */
+		SHUTDOWN_TRIGGERED,
 		/**
-		 * Shut down. Object no longer usable. No more sessions are active.
+		 * The process has exited and cleanup() has been called. In this state,
+		 * this object is no longer usable.
 		 */
-		SHUT_DOWN
+		DEAD
 	} lifeStatus;
 	enum EnabledStatus {
 		/** Up and operational. */
@@ -250,14 +295,31 @@ public:
 		 * requests. It *may* still handle some requests, e.g. by
 		 * the Out-of-Band-Work trigger.
 		 */
-		DISABLED
+		DISABLED,
+		/**
+		 * Process has been detached. It will be removed from the Group
+		 * as soon we have detected that the OS process has exited. Detached
+		 * processes are allowed to finish their requests, but are not
+		 * eligible for new requests.
+		 */
+		DETACHED
 	} enabled;
-	/** Marks whether the process requested out-of-band work. If so, we need to
-	 * wait until all sessions have ended and the process has been disabled.
-	 */
-	bool oobwRequested;
+	enum OobwStatus {
+		/** Process is not using out-of-band work. */
+		OOBW_NOT_ACTIVE,
+		/** The process has requested out-of-band work. At some point, the code
+		 * will see this and set the status to OOBW_IN_PROGRESS. */
+		OOBW_REQUESTED,
+		/** An out-of-band work is in progress. We need to wait until all
+		 * sessions have ended and the process has been disabled before the
+		 * out-of-band work can be performed. */
+		OOBW_IN_PROGRESS,
+	} oobwStatus;
 	/** Caches whether or not the OS process still exists. */
 	mutable bool m_osProcessExists;
+	bool longRunningConnectionsAborted;
+	/** Time at which shutdown began. */
+	time_t shutdownStartTime;
 	/** Collected by Pool::collectAnalytics(). */
 	ProcessMetrics metrics;
 	
@@ -278,6 +340,7 @@ public:
 		: pqHandle(NULL),
 		  libev(_libev.get()),
 		  pid(_pid),
+		  stickySessionId(0),
 		  gupid(_gupid),
 		  connectPassword(_connectPassword),
 		  adminSocket(_adminSocket),
@@ -291,25 +354,27 @@ public:
 		  processed(0),
 		  lifeStatus(ALIVE),
 		  enabled(ENABLED),
-		  oobwRequested(false),
-		  m_osProcessExists(true)
+		  oobwStatus(OOBW_NOT_ACTIVE),
+		  m_osProcessExists(true),
+		  longRunningConnectionsAborted(false),
+		  shutdownStartTime(0)
 	{
 		SpawnerConfigPtr config;
 		if (_config == NULL) {
-			config = make_shared<SpawnerConfig>();
+			config = boost::make_shared<SpawnerConfig>();
 		} else {
 			config = _config;
 		}
 
 		if (_adminSocket != -1) {
-			PipeWatcherPtr watcher = make_shared<PipeWatcher>(_adminSocket,
-				"stdout", pid, config->forwardStdout);
+			PipeWatcherPtr watcher = boost::make_shared<PipeWatcher>(_adminSocket,
+				"stdout", pid);
 			watcher->initialize();
 			watcher->start();
 		}
 		if (_errorPipe != -1) {
-			PipeWatcherPtr watcher = make_shared<PipeWatcher>(_errorPipe,
-				"stderr", pid, config->forwardStderr);
+			PipeWatcherPtr watcher = boost::make_shared<PipeWatcher>(_errorPipe,
+				"stderr", pid);
 			watcher->initialize();
 			watcher->start();
 		}
@@ -323,15 +388,19 @@ public:
 	}
 	
 	~Process() {
-		if (OXT_UNLIKELY(!isShutDown() && requiresShutdown)) {
-			P_BUG("You must call Process::shutdown() before actually "
+		if (OXT_UNLIKELY(!isDead() && requiresShutdown)) {
+			P_BUG("You must call Process::triggerShutdown() and Process::cleanup() before actually "
 				"destroying the Process object.");
 		}
 	}
 
-	static void maybeShutdown(ProcessPtr process) {
+	static void forceTriggerShutdownAndCleanup(ProcessPtr process) {
 		if (process != NULL) {
-			process->shutdown();
+			process->triggerShutdown();
+			// Pretend like the OS process has exited so
+			// that the canCleanup() precondition is true.
+			process->m_osProcessExists = false;
+			process->cleanup();
 		}
 	}
 
@@ -341,7 +410,7 @@ public:
 	 * @post result != NULL
 	 */
 	const GroupPtr getGroup() const {
-		assert(!isShutDown());
+		assert(!isDead());
 		return group.lock();
 	}
 	
@@ -352,55 +421,87 @@ public:
 
 	/**
 	 * Thread-safe.
-	 * @pre getLifeState() != SHUT_DOWN
+	 * @pre getLifeState() != DEAD
+	 * @post result != NULL
+	 */
+	PoolPtr getPool() const;
+
+	/**
+	 * Thread-safe.
+	 * @pre getLifeState() != DEAD
 	 * @post result != NULL
 	 */
 	SuperGroupPtr getSuperGroup() const;
 
 	// Thread-safe.
 	bool isAlive() const {
-		lock_guard<boost::mutex> lock(lifetimeSyncher);
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
 		return lifeStatus == ALIVE;
 	}
 
 	// Thread-safe.
-	bool isShutDown() const {
-		lock_guard<boost::mutex> lock(lifetimeSyncher);
-		return lifeStatus == SHUT_DOWN;
+	bool hasTriggeredShutdown() const {
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
+		return lifeStatus == SHUTDOWN_TRIGGERED;
+	}
+
+	// Thread-safe.
+	bool isDead() const {
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
+		return lifeStatus == DEAD;
 	}
 
 	// Thread-safe.
 	LifeStatus getLifeStatus() const {
-		lock_guard<boost::mutex> lock(lifetimeSyncher);
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
 		return lifeStatus;
 	}
 
-	void setShuttingDown() {
+	bool abortLongRunningConnections() {
+		bool sent = false;
+		if (!longRunningConnectionsAborted) {
+			SocketList::iterator it, end = sockets->end();
+			for (it = sockets->begin(); it != end; it++) {
+				Socket *socket = &(*it);
+				if (socket->name == "control") {
+					sendAbortLongRunningConnectionsMessage(socket->address);
+					sent = true;
+				}
+			}
+			longRunningConnectionsAborted = true;
+		}
+		return sent;
+	}
+
+	bool canTriggerShutdown() const {
+		return getLifeStatus() == ALIVE && sessions == 0;
+	}
+
+	void triggerShutdown() {
+		assert(canTriggerShutdown());
 		{
-			lock_guard<boost::mutex> lock(lifetimeSyncher);
+			boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
 			assert(lifeStatus == ALIVE);
-			lifeStatus = SHUTTING_DOWN;
+			lifeStatus = SHUTDOWN_TRIGGERED;
+			shutdownStartTime = SystemTime::get();
 		}
 		if (!dummy) {
 			syscalls::shutdown(adminSocket, SHUT_WR);
 		}
 	}
 
-	void shutdown() {
-		LifeStatus ls = getLifeStatus();
-		if (ls == SHUT_DOWN || !requiresShutdown) {
-			// Some code have guards that call process->shutdown().
-			// Returning instead of enforcing !isShutdown() makes things easier.
-			return;
-		}
+	bool shutdownTimeoutExpired() const {
+		return SystemTime::get() >= shutdownStartTime + PROCESS_SHUTDOWN_TIMEOUT;
+	}
 
-		assert(sessions == 0);
+	bool canCleanup() const {
+		return getLifeStatus() == SHUTDOWN_TRIGGERED && !osProcessExists();
+	}
 
-		if (ls == ALIVE) {
-			setShuttingDown();
-		}
+	void cleanup() {
+		assert(canCleanup());
 
-		P_TRACE(2, "Shutting down Process object " << inspect());
+		P_TRACE(2, "Cleaning up process " << inspect());
 		if (!dummy) {
 			if (OXT_LIKELY(sockets != NULL)) {
 				SocketList::const_iterator it, end = sockets->end();
@@ -413,12 +514,8 @@ public:
 			}
 		}
 
-		lock_guard<boost::mutex> lock(lifetimeSyncher);
-		lifeStatus = SHUT_DOWN;
-	}
-
-	bool canBeShutDown() const {
-		return sessions == 0 && !osProcessExists();
+		boost::lock_guard<boost::mutex> lock(lifetimeSyncher);
+		lifeStatus = DEAD;
 	}
 
 	/** Checks whether the OS process exists.
@@ -428,21 +525,38 @@ public:
 	 */
 	bool osProcessExists() const {
 		if (!dummy && m_osProcessExists) {
-			// Once we detect that a process is gone.
-			m_osProcessExists = syscalls::kill(pid, 0) == 0 || errno != ESRCH;
+			if (syscalls::kill(pid, 0) == 0) {
+				/* On some environments, e.g. Heroku, the init process does
+				 * not properly reap adopted zombie processes, which can interfere
+				 * with our process existance check. To work around this, we
+				 * explicitly check whether or not the process has become a zombie.
+				 */
+				m_osProcessExists = !isZombie(pid);
+			} else {
+				m_osProcessExists = errno != ESRCH;
+			}
 			return m_osProcessExists;
 		} else {
 			return false;
 		}
 	}
+
+	/** Kill the OS process with the given signal. */
+	int kill(int signo) {
+		if (osProcessExists()) {
+			return syscalls::kill(pid, signo);
+		} else {
+			return 0;
+		}
+	}
 	
-	int utilization() const {
+	int busyness() const {
 		/* Different processes within a Group may have different
 		 * 'concurrency' values. We want:
 		 * - Group.pqueue to sort the processes from least used to most used.
 		 * - to give processes with concurrency == 0 more priority over processes
 		 *   with concurrency > 0.
-		 * Therefore, we describe our utilization as a percentage of 'concurrency', with
+		 * Therefore, we describe our busyness as a percentage of 'concurrency', with
 		 * the percentage value in [0..INT_MAX] instead of [0..1].
 		 */
 		if (concurrency == 0) {
@@ -457,13 +571,21 @@ public:
 		}
 	}
 	
-	// TODO: remove this
-	bool atFullCapacity() const {
-		return atFullUtilization();
+	/**
+	 * Whether we've reached the maximum number of concurrent sessions for this
+	 * process.
+	 */
+	bool isTotallyBusy() const {
+		return concurrency != 0 && sessions >= concurrency;
 	}
 
-	bool atFullUtilization() const {
-		return concurrency != 0 && sessions >= concurrency;
+	/**
+	 * Whether a get() request can be routed to this process, assuming that
+	 * the sticky session ID (if any) matches. This is only not the case
+	 * if this process is totally busy.
+	 */
+	bool canBeRoutedTo() const {
+		return !isTotallyBusy();
 	}
 	
 	/**
@@ -477,15 +599,14 @@ public:
 	 */
 	SessionPtr newSession() {
 		Socket *socket = sessionSockets.pop();
-		if (socket->atFullCapacity()) {
+		if (socket->isTotallyBusy()) {
 			return SessionPtr();
 		} else {
 			socket->sessions++;
 			this->sessions++;
-			processed++;
-			socket->pqHandle = sessionSockets.push(socket, socket->utilization());
+			socket->pqHandle = sessionSockets.push(socket, socket->busyness());
 			lastUsed = SystemTime::getUsec();
-			return make_shared<Session>(shared_from_this(), socket);
+			return boost::make_shared<Session>(shared_from_this(), socket);
 		}
 	}
 	
@@ -497,8 +618,9 @@ public:
 		
 		socket->sessions--;
 		this->sessions--;
-		sessionSockets.decrease(socket->pqHandle, socket->utilization());
-		assert(!atFullUtilization());
+		processed++;
+		sessionSockets.decrease(socket->pqHandle, socket->busyness());
+		assert(!isTotallyBusy());
 	}
 
 	/**
@@ -513,42 +635,62 @@ public:
 	template<typename Stream>
 	void inspectXml(Stream &stream, bool includeSockets = true) const {
 		stream << "<pid>" << pid << "</pid>";
+		stream << "<sticky_session_id>" << stickySessionId << "</sticky_session_id>";
 		stream << "<gupid>" << gupid << "</gupid>";
 		stream << "<connect_password>" << connectPassword << "</connect_password>";
 		stream << "<concurrency>" << concurrency << "</concurrency>";
 		stream << "<sessions>" << sessions << "</sessions>";
-		stream << "<utilization>" << utilization() << "</utilization>";
+		stream << "<busyness>" << busyness() << "</busyness>";
 		stream << "<processed>" << processed << "</processed>";
 		stream << "<spawner_creation_time>" << spawnerCreationTime << "</spawner_creation_time>";
 		stream << "<spawn_start_time>" << spawnStartTime << "</spawn_start_time>";
 		stream << "<spawn_end_time>" << spawnEndTime << "</spawn_end_time>";
 		stream << "<last_used>" << lastUsed << "</last_used>";
+		stream << "<last_used_desc>" << distanceOfTimeInWords(lastUsed / 1000000).c_str() << " ago</last_used_desc>";
 		stream << "<uptime>" << uptime() << "</uptime>";
+		if (!codeRevision.empty()) {
+			stream << "<code_revision>" << codeRevision << "</code_revision>";
+		}
 		switch (lifeStatus) {
 		case ALIVE:
-			stream << "<life_status>alive</life_status>";
+			stream << "<life_status>ALIVE</life_status>";
 			break;
-		case SHUTTING_DOWN:
-			stream << "<life_status>shutting_down</life_status>";
+		case SHUTDOWN_TRIGGERED:
+			stream << "<life_status>SHUTDOWN_TRIGGERED</life_status>";
 			break;
-		case SHUT_DOWN:
-			stream << "<life_status>shut_down</life_status>";
+		case DEAD:
+			stream << "<life_status>DEAD</life_status>";
 			break;
 		default:
 			P_BUG("Unknown 'lifeStatus' state " << (int) lifeStatus);
 		}
 		switch (enabled) {
 		case ENABLED:
-			stream << "<enabled>enabled</enabled>";
+			stream << "<enabled>ENABLED</enabled>";
 			break;
 		case DISABLING:
-			stream << "<enabled>disabling</enabled>";
+			stream << "<enabled>DISABLING</enabled>";
 			break;
 		case DISABLED:
-			stream << "<enabled>disabled</enabled>";
+			stream << "<enabled>DISABLED</enabled>";
+			break;
+		case DETACHED:
+			stream << "<enabled>DETACHED</enabled>";
 			break;
 		default:
 			P_BUG("Unknown 'enabled' state " << (int) enabled);
+		}
+		if (metrics.isValid()) {
+			stream << "<has_metrics>true</has_metrics>";
+			stream << "<cpu>" << (int) metrics.cpu << "</cpu>";
+			stream << "<rss>" << metrics.rss << "</rss>";
+			stream << "<pss>" << metrics.pss << "</pss>";
+			stream << "<private_dirty>" << metrics.privateDirty << "</private_dirty>";
+			stream << "<swap>" << metrics.swap << "</swap>";
+			stream << "<real_memory>" << metrics.realMemory() << "</real_memory>";
+			stream << "<vmsize>" << metrics.vmsize << "</vmsize>";
+			stream << "<process_group_id>" << metrics.processGroupId << "</process_group_id>";
+			stream << "<command>" << escapeForXml(metrics.command) << "</command>";
 		}
 		if (includeSockets) {
 			SocketList::const_iterator it;

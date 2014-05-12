@@ -30,9 +30,9 @@
 
 #include <ngx_config.h>
 #include <ngx_core.h>
-#include "../common/AgentsStarter.h"
-#include "../common/ApplicationPool2/AppTypes.h"
-#include "../common/Utils/CachedFileStat.h"
+#include "common/AgentsStarter.h"
+#include "common/ApplicationPool2/AppTypes.h"
+#include "common/Utils/CachedFileStat.h"
 
 /**
  * The Nginx version number as an integer.
@@ -48,20 +48,18 @@ extern ngx_module_t ngx_http_passenger_module;
 /**
  * A static schema string to be assigned to Nginx 'upstream' strctures.
  */
-extern ngx_str_t                passenger_schema_string;
+extern ngx_str_t                pp_schema_string;
 
-extern ngx_str_t                passenger_placeholder_upstream_address;
+extern ngx_str_t                pp_placeholder_upstream_address;
 
-/**
- * A CachedFileStat object used for caching stat() calls.
- */
-extern PassengerCachedFileStat *passenger_stat_cache;
+/** A CachedFileStat object used for caching stat() calls. */
+extern PP_CachedFileStat        *pp_stat_cache;
 
-extern PassengerAppTypeDetector *passenger_app_type_detector;
+extern PP_AppTypeDetector       *pp_app_type_detector;
 
-extern AgentsStarter           *passenger_agents_starter;
+extern PP_AgentsStarter         *pp_agents_starter;
 
-extern ngx_cycle_t             *passenger_current_cycle;
+extern ngx_cycle_t              *pp_current_cycle;
 
 #endif /* _PASSENGER_NGINX_MODULE_H_ */
 

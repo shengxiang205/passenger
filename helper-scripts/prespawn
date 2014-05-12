@@ -27,6 +27,7 @@ STDERR.sync = true
 
 require 'uri'
 require 'socket'
+require 'timeout'
 
 class PrespawnLocation
 	class InvalidURLError < RuntimeError
@@ -92,7 +93,12 @@ class PrespawnLocation
 		socket.write("Connection: close\r\n")
 		socket.write("\r\n")
 
-		socket.read
+		begin
+			Timeout.timeout(10) do
+				socket.read
+			end
+		rescue Timeout::Error
+		end
 	end
 end
 
@@ -103,6 +109,8 @@ class TCPPrespawnLocation < PrespawnLocation
 
 	def connect
 		TCPSocket.new('127.0.0.1', request_port)
+	rescue Errno::ECONNREFUSED
+		TCPSocket.new('::1', request_port)
 	end
 end
 

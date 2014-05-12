@@ -1,6 +1,6 @@
 # encoding: binary
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2011, 2012 Phusion
+#  Copyright (c) 2011-2013 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -22,8 +22,9 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
-require 'phusion_passenger/public_api'
-require 'phusion_passenger/debug_logging'
+PhusionPassenger.require_passenger_lib 'constants'
+PhusionPassenger.require_passenger_lib 'public_api'
+PhusionPassenger.require_passenger_lib 'debug_logging'
 
 module PhusionPassenger
 
@@ -32,16 +33,36 @@ module LoaderSharedHelpers
 	extend self
 
 	# To be called by the (pre)loader as soon as possible.
-	def init
+	def init(options)
 		Thread.main[:name] = "Main thread"
 		# We don't dump PATH info because at this point it's
 		# unlikely to be changed.
 		dump_ruby_environment
+		check_rvm_using_wrapper_script(options)
+		return sanitize_spawn_options(options)
+7	end
+
+	def check_rvm_using_wrapper_script(options)
+		ruby = options["ruby"]
+		if ruby =~ %r(/\.?rvm/) && ruby =~ %r(/bin/ruby$)
+			raise "You've set the `PassengerRuby` (Apache) or `passenger_ruby` (Nginx) option to '#{ruby}'. " +
+				"However, because you are using RVM, this is not allowed: the option must point to " +
+				"an RVM wrapper script, not a raw Ruby binary. This is because RVM is implemented " +
+				"through various environment variables, which are set through the wrapper script.\n" +
+				"\n" +
+				"To find out the correct value for `PassengerRuby`/`passenger_ruby`, please read:\n\n" +
+				"  #{APACHE2_DOC_URL}#PassengerRuby\n\n" +
+				"  #{NGINX_DOC_URL}#PassengerRuby\n\n" +
+				"Scroll to section 'RVM helper tool'.\n" +
+				"\n-------------------------\n"
+		end
 	end
 
 	# To be called whenever the (pre)loader is about to abort with an error.
 	def about_to_abort(exception = nil)
 		dump_all_information
+		# https://code.google.com/p/phusion-passenger/issues/detail?id=1039
+		puts
 	end
 
 	def to_boolean(value)
@@ -81,12 +102,12 @@ module LoaderSharedHelpers
 				f.puts "RUBY_PLATFORM = #{RUBY_PLATFORM}"
 				f.puts "RUBY_ENGINE = #{defined?(RUBY_ENGINE) ? RUBY_ENGINE : 'nil'}"
 			end
-			File.open("#{dir}/load_path", "w") do |f|
+			File.open("#{dir}/load_path", "wb") do |f|
 				$LOAD_PATH.each do |path|
 					f.puts path
 				end
 			end
-			File.open("#{dir}/loaded_libs", "w") do |f|
+			File.open("#{dir}/loaded_libs", "wb") do |f|
 				$LOADED_FEATURES.each do |filename|
 					f.puts filename
 				end
@@ -94,22 +115,27 @@ module LoaderSharedHelpers
 
 			# We write to these files last because the 'require' calls can fail.
 			require 'rbconfig' if !defined?(RbConfig::CONFIG)
-			File.open("#{dir}/rbconfig", "w") do |f|
+			File.open("#{dir}/rbconfig", "wb") do |f|
 				RbConfig::CONFIG.each_pair do |key, value|
 					f.puts "#{key} = #{value}"
 				end
 			end
-			require 'rubygems' if !defined?(Gem)
-			File.open("#{dir}/ruby_info", "a") do |f|
-				f.puts "RubyGems version = #{Gem::VERSION}"
+			begin
+				require 'rubygems' if !defined?(Gem)
+			rescue LoadError
 			end
-			File.open("#{dir}/activated_gems", "w") do |f|
-				if Gem.respond_to?(:loaded_specs)
-					Gem.loaded_specs.each_pair do |name, spec|
-						f.puts "#{name} => #{spec.version}"
+			if defined?(Gem)
+				File.open("#{dir}/ruby_info", "a") do |f|
+					f.puts "RubyGems version = #{Gem::VERSION}"
+				end
+				File.open("#{dir}/activated_gems", "wb") do |f|
+					if Gem.respond_to?(:loaded_specs)
+						Gem.loaded_specs.each_pair do |name, spec|
+							f.puts "#{name} => #{spec.version}"
+						end
+					else
+						f.puts "Unable to query this information; incompatible RubyGems API."
 					end
-				else
-					f.puts "Unable to query this information; incompatible RubyGems API."
 				end
 			end
 		end
@@ -119,7 +145,7 @@ module LoaderSharedHelpers
 
 	def dump_envvars
 		if dir = ENV['PASSENGER_DEBUG_DIR']
-			File.open("#{dir}/envvars", "w") do |f|
+			File.open("#{dir}/envvars", "wb") do |f|
 				ENV.each_pair do |key, value|
 					f.puts "#{key} = #{value}"
 				end
@@ -131,7 +157,7 @@ module LoaderSharedHelpers
 
 	def dump_system_memory_stats
 		if dir = ENV['PASSENGER_DEBUG_DIR']
-			File.open("#{dir}/sysmemory", "w") do |f|
+			File.open("#{dir}/sysmemory", "wb") do |f|
 				f.write(`"#{PhusionPassenger.helper_scripts_dir}/system-memory-stats.py"`)
 			end
 		end
@@ -152,7 +178,7 @@ module LoaderSharedHelpers
 		DebugLogging.log_level = options["log_level"] if options["log_level"]
 
 		# Instantiate the analytics logger if requested. Can be nil.
-		require 'phusion_passenger/analytics_logger'
+		PhusionPassenger.require_passenger_lib 'analytics_logger'
 		options["analytics_logger"] = AnalyticsLogger.new_from_options(options)
 	end
 	
@@ -187,17 +213,23 @@ module LoaderSharedHelpers
 		elsif File.exist?('config/setup_load_paths.rb')
 			require File.expand_path('config/setup_load_paths')
 		
-		# If the Bundler lock environment file exists then load that. If it
+		# Older versions of Bundler use .bundle/environment.rb as the Bundler
+		# environment lock file. This has been replaced by Gemfile.lock in later
+		# versions, but we still support the older mechanism.
+		# If the Bundler environment lock file exists then load that. If it
 		# exists then there's a 99.9% chance that loading it is the correct
 		# thing to do.
 		elsif File.exist?('.bundle/environment.rb')
-			require File.expand_path('.bundle/environment')
+			running_bundler(options) do
+				require File.expand_path('.bundle/environment')
+			end
 		
-		# If the Bundler environment file doesn't exist then there are two
+		# If the legacy Bundler environment file doesn't exist then there are two
 		# possibilities:
 		# 1. Bundler is not used, in which case we don't have to do anything.
-		# 2. Bundler *is* used, but the gems are not locked and we're supposed
-		#    to call Bundler.setup.
+		# 2. Bundler *is* used, but either the user is using a newer Bundler versions,
+		#    or the gems are not locked. In either case, we're supposed to call
+		#    Bundler.setup.
 		#
 		# The existence of Gemfile indicates whether (2) is true:
 		elsif File.exist?('Gemfile')
@@ -208,17 +240,10 @@ module LoaderSharedHelpers
 			# harmless. If this isn't the correct thing to do after all then
 			# there's always the load_path_setup_file option and
 			# setup_load_paths.rb.
-			require 'rubygems'
-			require 'bundler/setup'
-		end
-		
-		# Bundler might remove Phusion Passenger from the load path in its zealous
-		# attempt to un-require RubyGems, so here we put Phusion Passenger back
-		# into the load path. This must be done before loading the app's startup
-		# file because the app might require() Phusion Passenger files.
-		if !$LOAD_PATH.include?(PhusionPassenger.ruby_libdir)
-			$LOAD_PATH.unshift(PhusionPassenger.ruby_libdir)
-			$LOAD_PATH.uniq!
+			running_bundler(options) do
+				require 'rubygems'
+				require 'bundler/setup'
+			end
 		end
 		
 		
@@ -234,15 +259,6 @@ module LoaderSharedHelpers
 	# This method is to be called after loading the application code but
 	# before forking a worker process.
 	def after_loading_app_code(options)
-		# Even though run_load_path_setup_code() restores the Phusion Passenger
-		# load path after setting up Bundler, the app itself might also
-		# remove Phusion Passenger from the load path for whatever reason,
-		# so here we restore the load path again.
-		if !$LOAD_PATH.include?(PhusionPassenger.ruby_libdir)
-			$LOAD_PATH.unshift(PhusionPassenger.ruby_libdir)
-			$LOAD_PATH.uniq!
-		end
-		
 		# Post-install framework extensions. Possibly preceded by a call to
 		# PhusionPassenger.install_framework_extensions!
 		if defined?(::Rails) && !defined?(::Rails::VERSION)
@@ -260,9 +276,17 @@ module LoaderSharedHelpers
 		end
 	end
 	
+	def advertise_readiness
+		# https://code.google.com/p/phusion-passenger/issues/detail?id=1039
+		puts
+
+		puts "!> Ready"
+	end
+
 	def advertise_sockets(output, request_handler)
 		request_handler.server_sockets.each_pair do |name, options|
-			output.puts "!> socket: #{name};#{options[:address]};#{options[:protocol]};#{options[:concurrency]}"
+			concurrency = PhusionPassenger.advertised_concurrency_level || options[:concurrency]
+			output.puts "!> socket: #{name};#{options[:address]};#{options[:protocol]};#{concurrency}"
 		end
 	end
 	
@@ -317,6 +341,109 @@ module LoaderSharedHelpers
 	# will fire off necessary events perform necessary cleanup tasks.
 	def after_handling_requests
 		PhusionPassenger.call_event(:stopping_worker_process)
+	end
+
+private
+	def running_bundler(options)
+		yield
+	rescue Exception => e
+		if (defined?(Bundler::GemNotFound) && e.is_a?(Bundler::GemNotFound)) ||
+		   (defined?(Bundler::GitError) && e.is_a?(Bundler::GitError))
+			PhusionPassenger.require_passenger_lib 'platform_info/ruby'
+			comment =
+				"<p>It looks like Bundler could not find a gem. Maybe you didn't install all the " +
+				"gems that this application needs. To install your gems, please run:</p>\n\n" +
+				"  <pre class=\"commands\">bundle install</pre>\n\n"
+			ruby = options["ruby"]
+			if ruby =~ %r(^/usr/local/rvm/)
+				comment <<
+					"<p>If that didn't work, then maybe the problem is that your gems are installed " +
+					"to <code>#{h home_dir}/.rvm/gems</code>, while at the same time you set " +
+					"<code>PassengerRuby</code> (Apache) or <code>passenger_ruby</code> (Nginx) to " +
+					"<code>#{h ruby}</code>. Because of the latter, RVM does not load gems from the " +
+					"home directory.</p>\n\n" +
+					"<p>To make RVM load gems from the home directory, you need to set " +
+					"<code>PassengerRuby</code>/<code>passenger_ruby</code> to an RVM wrapper script " +
+					"inside the home directory:</p>\n\n" +
+					"<ol>\n" +
+					"  <li>Login as #{h whoami}.</li>\n"
+				if PlatformInfo.rvm_installation_mode == :multi
+					comment <<
+						"  <li>Enable RVM mixed mode by running:\n" +
+						"      <pre class=\"commands\">rvm user gemsets</pre></li>\n"
+				end
+				comment <<
+					"  <li>Run this to find out what to set <code>PassengerRuby</code>/<code>passenger_ruby</code> to:\n" +
+					"      <pre class=\"commands\">#{PlatformInfo.ruby_command} \\\n" +
+					"#{PhusionPassenger.bin_dir}/passenger-config --detect-ruby</pre></li>\n" +
+					"</ol>\n\n" +
+					"<p>If that didn't help either, then maybe your application is being run under a " +
+					"different environment than it's supposed to. Please check the following:</p>\n\n"
+			else
+				comment <<
+					"<p>If that didn't work, then the problem is probably caused by your " +
+					"application being run under a different environment than it's supposed to. " +
+					"Please check the following:</p>\n\n"
+			end
+			comment << "<ol>\n"
+			comment <<
+				"  <li>Is this app supposed to be run as the <code>#{h whoami}</code> user?</li>\n" +
+				"  <li>Is this app being run on the correct Ruby interpreter? Below you will\n" +
+				"      see which Ruby interpreter Phusion Passenger attempted to use.</li>\n"
+			if PlatformInfo.in_rvm?
+				comment <<
+					"  <li>Please check whether the correct RVM gemset is being used.</li>\n" +
+					"  <li>Sometimes, RVM gemsets may be broken.\n" +
+					"      <a href=\"https://github.com/phusion/passenger/wiki/Resetting-RVM-gemsets\">Try resetting them.</a></li>\n"
+			end
+			comment << "</ol>\n"
+			prepend_exception_html_comment(e, comment)
+		end
+		raise e
+	end
+
+	def prepend_exception_html_comment(e, comment)
+		# Since Exception doesn't allow changing the message, we monkeypatch
+		# the #message and #to_s methods.
+		separator = "\n<p>-------- The exception is as follows: -------</p>\n"
+		new_message = comment + separator + h(e.message)
+		new_s = comment + separator + h(e.to_s)
+		metaclass = class << e; self; end
+		metaclass.send(:define_method, :message) do
+			new_message
+		end
+		metaclass.send(:define_method, :to_s) do
+			new_s
+		end
+		metaclass.send(:define_method, :html?) do
+			true
+		end
+	end
+
+	def h(text)
+		require 'erb' if !defined?(ERB)
+		return ERB::Util.h(text)
+	end
+
+	def whoami
+		require 'etc' if !defined?(Etc)
+		begin
+			user = Etc.getpwuid(Process.uid)
+		rescue ArgumentError
+			user = nil
+		end
+		if user
+			return user.name
+		else
+			return "##{Process.uid}"
+		end
+	end
+
+	def home_dir
+		@home_dir ||= begin
+			require 'etc' if !defined?(Etc)
+			Etc.getpwuid(Process.uid).dir
+		end
 	end
 end
 

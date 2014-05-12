@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010, 2011, 2012 Phusion
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -138,7 +138,7 @@ struct Connection {
 	}
 };
 
-typedef shared_ptr<Connection> ConnectionPtr;
+typedef boost::shared_ptr<Connection> ConnectionPtr;
 
 
 /** A special lock type for Connection that also keeps a smart
@@ -217,7 +217,7 @@ enum ExceptionHandlingMode {
 
 
 class LoggerFactory;
-typedef shared_ptr<LoggerFactory> LoggerFactoryPtr;
+typedef boost::shared_ptr<LoggerFactory> LoggerFactoryPtr;
 
 inline void _checkinConnection(const LoggerFactoryPtr &loggerFactory, const ConnectionPtr &connection);
 
@@ -269,15 +269,16 @@ private:
 		switch (exceptionHandlingMode) {
 		case THROW:
 			throw e;
-		case PRINT:
-			try {
-				const tracable_exception &te =
-					dynamic_cast<const tracable_exception &>(e);
-				P_WARN(te.what() << "\n" << te.backtrace());
-			} catch (const bad_cast &) {
-				P_WARN(e.what());
+		case PRINT: {
+				const tracable_exception *te =
+					dynamic_cast<const tracable_exception *>(&e);
+				if (te != NULL) {
+					P_WARN(te->what() << "\n" << te->backtrace());
+				} else {
+					P_WARN(e.what());
+				}
+				break;
 			}
-			break;
 		default:
 			break;
 		}
@@ -425,7 +426,7 @@ public:
 	}
 };
 
-typedef shared_ptr<Logger> LoggerPtr;
+typedef boost::shared_ptr<Logger> LoggerPtr;
 
 
 class ScopeLog: public noncopyable {
@@ -550,7 +551,7 @@ public:
 };
 
 
-class LoggerFactory: public enable_shared_from_this<LoggerFactory> {
+class LoggerFactory: public boost::enable_shared_from_this<LoggerFactory> {
 private:
 	static const unsigned int CONNECTION_POOL_MAX_SIZE = 10;
 
@@ -587,12 +588,7 @@ private:
 
 	template<typename T>
 	static bool instanceof(const std::exception &e) {
-		try {
-			(void) dynamic_cast<const T &>(e);
-			return true;
-		} catch (const bad_cast &) {
-			return false;
-		}
+		return dynamic_cast<const T *>(&e) != NULL;
 	}
 	
 	ConnectionPtr createNewConnection() {
@@ -641,12 +637,12 @@ private:
 		}
 		
 		guard.clear();
-		return make_shared<Connection>(fd);
+		return boost::make_shared<Connection>(fd);
 	}
 	
 public:
 	LoggerFactory() {
-		nullLogger = make_shared<Logger>();
+		nullLogger = boost::make_shared<Logger>();
 	}
 	
 	LoggerFactory(const string &_serverAddress, const string &_username,
@@ -656,7 +652,7 @@ public:
 		  password(_password),
 		  nodeName(determineNodeName(_nodeName))
 	{
-		nullLogger = make_shared<Logger>();
+		nullLogger = boost::make_shared<Logger>();
 		if (!_serverAddress.empty() && isLocalSocketAddress(_serverAddress)) {
 			maxConnectTries = 10;
 		} else {
@@ -668,7 +664,7 @@ public:
 
 	ConnectionPtr checkoutConnection() {
 		TRACE_POINT();
-		unique_lock<boost::mutex> l(syncher);
+		boost::unique_lock<boost::mutex> l(syncher);
 		if (!connectionPool.empty()) {
 			P_TRACE(3, "Checked out existing connection");
 			ConnectionPtr connection = connectionPool.back();
@@ -710,7 +706,7 @@ public:
 	}
 
 	void checkinConnection(const ConnectionPtr &connection) {
-		lock_guard<boost::mutex> l(syncher);
+		boost::lock_guard<boost::mutex> l(syncher);
 		if (connectionPool.size() < CONNECTION_POOL_MAX_SIZE) {
 			connectionPool.push_back(connection);
 		} else {
@@ -724,7 +720,7 @@ public:
 	
 	LoggerPtr newTransaction(const string &groupName,
 		const string &category = "requests",
-		const string &unionStationKey = string(),
+		const string &unionStationKey = "-",
 		const string &filters = string())
 	{
 		if (serverAddress.empty()) {
@@ -786,7 +782,7 @@ public:
 			
 			vector<string> args;
 			if (!readArrayMessage(connection->fd, args, &timeout)) {
-				lock_guard<boost::mutex> l(syncher);
+				boost::lock_guard<boost::mutex> l(syncher);
 				P_WARN("The logging agent at " << serverAddress <<
 					" closed the connection (no error message given);" <<
 					" will reconnect in " << reconnectTimeout / 1000000 <<
@@ -794,7 +790,7 @@ public:
 				nextReconnectTime = SystemTime::getUsec() + reconnectTimeout;
 				return createNullLogger();
 			} else if (args.size() == 2 && args[0] == "error") {
-				lock_guard<boost::mutex> l(syncher);
+				boost::lock_guard<boost::mutex> l(syncher);
 				P_WARN("The logging agent at " << serverAddress <<
 					" closed the connection (error message: " << args[1] <<
 					"); will reconnect in " << reconnectTimeout / 1000000 <<
@@ -802,7 +798,7 @@ public:
 				nextReconnectTime = SystemTime::getUsec() + reconnectTimeout;
 				return createNullLogger();
 			} else if (args.empty() || args[0] != "ok") {
-				lock_guard<boost::mutex> l(syncher);
+				boost::lock_guard<boost::mutex> l(syncher);
 				P_WARN("The logging agent at " << serverAddress <<
 					" sent an unexpected reply;" <<
 					" will reconnect in " << reconnectTimeout / 1000000 <<
@@ -812,14 +808,14 @@ public:
 			}
 			
 			guard.clear();
-			return make_shared<Logger>(shared_from_this(),
+			return boost::make_shared<Logger>(shared_from_this(),
 				connection,
 				string(txnId, end - txnId),
 				groupName, category,
 				unionStationKey);
 			
 		} catch (const TimeoutException &) {
-			lock_guard<boost::mutex> l(syncher);
+			boost::lock_guard<boost::mutex> l(syncher);
 			P_WARN("Timeout trying to communicate with the logging agent at " << serverAddress << "; " <<
 				"will reconnect in " << reconnectTimeout / 1000000 << " second(s).");
 			nextReconnectTime = SystemTime::getUsec() + reconnectTimeout;
@@ -832,7 +828,7 @@ public:
 				
 				guard.clear();
 				gotErrorResponse = connection->disconnect(errorResponse);
-				lock_guard<boost::mutex> l(syncher);
+				boost::lock_guard<boost::mutex> l(syncher);
 				if (gotErrorResponse) {
 					P_WARN("The logging agent at " << serverAddress <<
 						" closed the connection (error message: " << errorResponse <<
@@ -855,7 +851,7 @@ public:
 	LoggerPtr continueTransaction(const string &txnId,
 		const string &groupName,
 		const string &category = "requests",
-		const string &unionStationKey = string())
+		const string &unionStationKey = "-")
 	{
 		if (serverAddress.empty() || txnId.empty()) {
 			return createNullLogger();
@@ -885,13 +881,13 @@ public:
 				"true",
 				NULL);
 			guard.clear();
-			return make_shared<Logger>(shared_from_this(),
+			return boost::make_shared<Logger>(shared_from_this(),
 				connection,
 				txnId, groupName, category,
 				unionStationKey);
 			
 		} catch (const TimeoutException &) {
-			lock_guard<boost::mutex> l(syncher);
+			boost::lock_guard<boost::mutex> l(syncher);
 			P_WARN("Timeout trying to communicate with the logging agent at " << serverAddress << "; " <<
 				"will reconnect in " << reconnectTimeout / 1000000 << " second(s).");
 			nextReconnectTime = SystemTime::getUsec() + reconnectTimeout;
@@ -904,7 +900,7 @@ public:
 				
 				guard.clear();
 				gotErrorResponse = connection->disconnect(errorResponse);
-				lock_guard<boost::mutex> l(syncher);
+				boost::lock_guard<boost::mutex> l(syncher);
 				if (gotErrorResponse) {
 					P_WARN("The logging agent at " << serverAddress <<
 						" closed the connection (error message: " << errorResponse <<
@@ -925,12 +921,12 @@ public:
 	}
 	
 	void setMaxConnectTries(unsigned int value) {
-		lock_guard<boost::mutex> l(syncher);
+		boost::lock_guard<boost::mutex> l(syncher);
 		maxConnectTries = value;
 	}
 	
 	void setReconnectTimeout(unsigned long long usec) {
-		lock_guard<boost::mutex> l(syncher);
+		boost::lock_guard<boost::mutex> l(syncher);
 		reconnectTimeout = usec;
 	}
 	

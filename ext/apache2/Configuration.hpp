@@ -25,10 +25,11 @@
 #ifndef _PASSENGER_CONFIGURATION_HPP_
 #define _PASSENGER_CONFIGURATION_HPP_
 
-#include "Utils.h"
-#include "Logging.h"
-#include "ServerInstanceDir.h"
-#include "Constants.h"
+#include <Logging.h>
+#include <ServerInstanceDir.h>
+#include <Constants.h>
+#include <Utils.h>
+#include <Utils/VariantMap.h>
 
 /* The APR headers must come after the Passenger headers. See Hooks.cpp
  * to learn why.
@@ -52,6 +53,8 @@ namespace Passenger {
 
 using namespace std;
 
+#define UNSET_INT_VALUE INT_MIN
+
 	
 /**
  * Per-directory configuration information.
@@ -63,17 +66,9 @@ struct DirConfig {
 	enum Threeway { ENABLED, DISABLED, UNSET };
 	enum SpawnMethod { SM_UNSET, SM_SMART, SM_DIRECT };
 	
-	Threeway enabled;
-	
-	std::set<std::string> railsBaseURIs;
-	std::set<std::string> rackBaseURIs;
-	
-	/** The Ruby interpreter to use. */
-	const char *ruby;
-	
-	/** The environment (RAILS_ENV/RACK_ENV/WSGI_ENV) under which
-	 * applications should operate. */
-	const char *environment;
+	#include "ConfigurationFields.hpp"
+
+	std::set<std::string> baseURIs;
 	
 	/** The path to the application's root (for example: RAILS_ROOT
 	 * for Rails applications, directory containing 'config.ru'
@@ -82,19 +77,10 @@ struct DirConfig {
 	 */
 	const char *appRoot;
 	
-	/** The environment (i.e. value for RACK_ENV) under which
-	 * Rack applications should operate. */
-	const char *rackEnv;
-	
 	string appGroupName;
 	
 	/** The spawn method to use. */
 	SpawnMethod spawnMethod;
-	
-	/** See PoolOptions for more info. */
-	const char *user;
-	/** See PoolOptions for more info. */
-	const char *group;
 	
 	/**
 	 * The idle timeout, in seconds, of preloader processes.
@@ -103,36 +89,12 @@ struct DirConfig {
 	 * and the default value should be used).
 	 */
 	long maxPreloaderIdleTime;
-	
-	/**
-	 * The maximum number of requests that the spawned application may process
-	 * before exiting. A value of 0 means unlimited.
-	 */
-	unsigned long maxRequests;
-	
-	/** Indicates whether the maxRequests option was explicitly specified
-	 * in the directory configuration. */
-	bool maxRequestsSpecified;
-	
-	/**
-	 * The minimum number of processes for a group that should be kept in
-	 * the pool when cleaning idle processes. Defaults to 0.
-	 */
-	unsigned long minInstances;
-	
-	/**
-	 * Indicates whether the minInstances option was explicitly specified
-	 * in the directory configuration. */
-	bool minInstancesSpecified;
-	
+
 	/** Whether symlinks in the document root path should be resolved.
 	 * The implication of this is documented in the users guide, section
 	 * "How Phusion Passenger detects whether a virtual host is a web application".
 	 */
 	Threeway resolveSymlinksInDocRoot;
-	
-	/** Whether high performance mode should be turned on. */
-	Threeway highPerformance;
 	
 	/**
 	 * Whether encoded slashes in URLs should be supported. This however conflicts
@@ -189,42 +151,6 @@ struct DirConfig {
 		return enabled != DISABLED;
 	}
 	
-	string getAppRoot(const StaticString &documentRoot) const {
-		if (appRoot == NULL) {
-			if (resolveSymlinksInDocRoot == DirConfig::ENABLED) {
-				return extractDirName(resolveSymlink(documentRoot));
-			} else {
-				return extractDirName(documentRoot);
-			}
-		} else {
-			return appRoot;
-		}
-	}
-	
-	StaticString getUser() const {
-		if (user != NULL) {
-			return user;
-		} else {
-			return "";
-		}
-	}
-	
-	StaticString getGroup() const {
-		if (group != NULL) {
-			return group;
-		} else {
-			return "";
-		}
-	}
-	
-	StaticString getEnvironment() const {
-		if (environment != NULL) {
-			return environment;
-		} else {
-			return "production";
-		}
-	}
-	
 	StaticString getAppGroupName(const StaticString &appRoot) const {
 		if (appGroupName.empty()) {
 			return appRoot;
@@ -243,23 +169,7 @@ struct DirConfig {
 			return "smart";
 		}
 	}
-	
-	unsigned long getMaxRequests() const {
-		if (maxRequestsSpecified) {
-			return maxRequests;
-		} else {
-			return 0;
-		}
-	}
-	
-	unsigned long getMinInstances() const {
-		if (minInstancesSpecified) {
-			return minInstances;
-		} else {
-			return 1;
-		}
-	}
-	
+
 	bool highPerformanceMode() const {
 		return highPerformance == ENABLED;
 	}
@@ -334,6 +244,11 @@ struct DirConfig {
 struct ServerConfig {
 	/** The Passenger root folder. */
 	const char *root;
+
+	VariantMap ctl;
+
+	/** The default Ruby interpreter to use. */
+	const char *defaultRuby;
 	
 	/** The log verbosity. */
 	int logLevel;
@@ -344,10 +259,6 @@ struct ServerConfig {
 	/** The maximum number of simultaneously alive application
 	 * instances. */
 	unsigned int maxPoolSize;
-	
-	/** The maximum number of simultaneously alive Rails application
-	 * that a single Rails application may occupy. */
-	unsigned int maxInstancesPerApp;
 	
 	/** The maximum number of seconds that an application may be
 	 * idle before it gets terminated. */
@@ -377,10 +288,10 @@ struct ServerConfig {
 	
 	ServerConfig() {
 		root               = NULL;
+		defaultRuby        = DEFAULT_RUBY;
 		logLevel           = DEFAULT_LOG_LEVEL;
 		debugLogFile       = NULL;
 		maxPoolSize        = DEFAULT_MAX_POOL_SIZE;
-		maxInstancesPerApp = DEFAULT_MAX_INSTANCES_PER_APP;
 		poolIdleTime       = DEFAULT_POOL_IDLE_TIME;
 		userSwitching      = true;
 		defaultUser        = DEFAULT_WEB_APP_USER;

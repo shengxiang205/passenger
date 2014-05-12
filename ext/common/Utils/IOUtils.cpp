@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010-2012 Phusion
+ *  Copyright (c) 2010-2013 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -744,7 +744,8 @@ writeExact(int fd, const void *data, unsigned int size, unsigned long long *time
 
 void
 writeExact(int fd, const StaticString &data, unsigned long long *timeout) {
-	writeExact(fd, data.c_str(), data.size(), timeout);
+	const char * restrict data_ptr = data.data();
+	writeExact(fd, data_ptr, data.size(), timeout);
 }
 
 /**
@@ -792,7 +793,7 @@ staticStringArrayToIoVec(const StaticString ary[], size_t count, struct iovec *v
  */
 static void
 findDataPositionIndexAndOffset(struct iovec data[], size_t count,
-	size_t position, size_t *index, size_t *offset)
+	size_t position, size_t * restrict index, size_t * restrict offset)
 {
 	size_t i;
 	size_t begin = 0;
@@ -816,14 +817,14 @@ findDataPositionIndexAndOffset(struct iovec data[], size_t count,
 	*offset = 0;
 }
 
-ssize_t
-gatheredWrite(int fd, const StaticString data[], unsigned int dataCount, string &restBuffer) {
+static ssize_t
+realGatheredWrite(int fd, const StaticString *data, unsigned int dataCount, string &restBuffer,
+	struct iovec *iov)
+{
 	size_t totalSize, iovCount, i;
 	ssize_t ret;
 	
 	if (restBuffer.empty()) {
-		struct iovec iov[dataCount];
-		
 		totalSize = staticStringArrayToIoVec(data, dataCount, iov, iovCount);
 		if (totalSize == 0) {
 			errno = 0;
@@ -875,8 +876,6 @@ gatheredWrite(int fd, const StaticString data[], unsigned int dataCount, string 
 			return totalSize;
 		}
 	} else {
-		struct iovec iov[dataCount + 1];
-		
 		iov[0].iov_base = (char *) restBuffer.data();
 		iov[0].iov_len  = restBuffer.size();
 		totalSize = staticStringArrayToIoVec(data, dataCount, iov + 1, iovCount);
@@ -945,6 +944,18 @@ gatheredWrite(int fd, const StaticString data[], unsigned int dataCount, string 
 	}
 }
 
+ssize_t
+gatheredWrite(int fd, const StaticString *data, unsigned int dataCount, string &restBuffer) {
+	if (dataCount < 8) {
+		struct iovec iov[8];
+		return realGatheredWrite(fd, data, dataCount, restBuffer, iov);
+	} else {
+		vector<struct iovec> iov;
+		iov.reserve(dataCount + 1);
+		return realGatheredWrite(fd, data, dataCount, restBuffer, &iov[0]);
+	}
+}
+
 static size_t
 eraseBeginningOfIoVec(struct iovec *iov, size_t count, size_t index, size_t offset) {
 	size_t i, newCount;
@@ -960,9 +971,10 @@ eraseBeginningOfIoVec(struct iovec *iov, size_t count, size_t index, size_t offs
 	return newCount;
 }
 
-void
-gatheredWrite(int fd, const StaticString data[], unsigned int count, unsigned long long *timeout) {
-	struct iovec iov[count];
+static void
+realGatheredWrite(int fd, const StaticString *data, unsigned int count, unsigned long long *timeout,
+	struct iovec *iov)
+{
 	size_t total, iovCount;
 	size_t written = 0;
 	
@@ -985,6 +997,18 @@ gatheredWrite(int fd, const StaticString data[], unsigned int count, unsigned lo
 		}
 	}
 	assert(written == total);
+}
+
+void
+gatheredWrite(int fd, const StaticString *data, unsigned int count, unsigned long long *timeout) {
+	if (count <= 8) {
+		struct iovec iov[8];
+		realGatheredWrite(fd, data, count, timeout, iov);
+	} else {
+		vector<struct iovec> iov;
+		iov.reserve(count);
+		realGatheredWrite(fd, data, count, timeout, &iov[0]);
+	}
 }
 
 void

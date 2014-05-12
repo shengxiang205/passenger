@@ -22,7 +22,10 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 
-require 'rubygems'
+begin
+	require 'rubygems'
+rescue LoadError
+end
 require 'socket'
 require 'thread'
 if (!defined?(RUBY_ENGINE) || RUBY_ENGINE == "ruby") && RUBY_VERSION < "1.8.7"
@@ -34,7 +37,7 @@ if (!defined?(RUBY_ENGINE) || RUBY_ENGINE == "ruby") && RUBY_VERSION < "1.8.7"
 			"gem install fastthread"
 	end
 end
-require 'phusion_passenger/native_support'
+PhusionPassenger.require_passenger_lib 'native_support'
 
 class Exception
 	def backtrace_string(current_location = nil)
@@ -43,8 +46,16 @@ class Exception
 		else
 			location = "in #{current_location} "
 		end
+		current_thread = Thread.current
+		if !(thread_id = current_thread[:id])
+			current_thread.to_s =~ /:(0x[0-9a-f]+)/i
+			thread_id = $1 || '?'
+		end
+		if thread_name = current_thread[:name]
+			thread_name = "(#{thread_name})"
+		end
 		return "*** Exception #{self.class} #{location}" <<
-			"(#{self}) (process #{$$}, thread #{Thread.current}):\n" <<
+			"(#{self}) (process #{$$}, thread #{thread_id}#{thread_name}):\n" <<
 			"\tfrom " << backtrace.join("\n\tfrom ")
 	end
 end

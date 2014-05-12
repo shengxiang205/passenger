@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010-2013 Phusion
+ *  Copyright (c) 2010-2014 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -33,16 +33,19 @@
 
 #include <boost/shared_ptr.hpp>
 #include <boost/bind.hpp>
+#include <boost/foreach.hpp>
 #include <oxt/thread.hpp>
 #include <string>
 #include <list>
 
 #include <Logging.h>
 #include <StaticString.h>
+#include <Utils.h>
 #include <Utils/BlockingQueue.h>
 #include <Utils/SystemTime.h>
 #include <Utils/ScopeGuard.h>
 #include <Utils/Base64.h>
+#include <Utils/json.h>
 #include <Utils/Curl.h>
 
 namespace Passenger {
@@ -124,6 +127,60 @@ private:
 			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 			responseBody.clear();
 		}
+
+		static bool validateResponse(const Json::Value &response) {
+			if (response.isObject() && response["status"].isString()) {
+				string status = response["status"].asString();
+				if (status == "ok") {
+					return true;
+				} else if (status == "error") {
+					return response["message"].isString();
+				} else {
+					return false;
+				}
+			} else {
+				return false;
+			}
+		}
+
+		bool handleSendResponse() {
+			Json::Reader reader;
+			Json::Value response;
+			long httpCode = -1;
+
+			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+			if (!reader.parse(responseBody, response, false) || !validateResponse(response)) {
+				P_ERROR("The Union Station gateway server " << ip << " encountered an error "
+					"while processing sent analytics data. It sent an invalid response "
+					"(parse error: " << reader.getFormattedErrorMessages().c_str() <<
+					"; HTTP code: " << httpCode <<
+					"; data: \"" << cEscapeString(responseBody) << "\").");
+				return false;
+			} else if (response["status"].asString() == "ok") {
+				if (httpCode == 200) {
+					P_DEBUG("The Union Station gateway server " << ip << " accepted the packet.");
+					return true;
+				} else {
+					P_ERROR("The Union Station gateway server " << ip << " encountered an error "
+						"while processing sent analytics data. It sent an invalid response "
+						"(HTTP code: " << httpCode <<
+						"; data: \"" << cEscapeString(responseBody) << "\").");
+					return false;
+				}
+			} else {
+				// response == error
+				P_ERROR("The Union Station gateway server " << ip << " did not accept the "
+					"sent analytics data. Error message: " << response["message"].asString());
+				// Return value of true is intentional. See comment for send().
+				return true;
+			}
+		}
+
+		void handleSendError() {
+			P_ERROR("Could not send data to Union Station gateway server " << ip
+				<< ": " << lastErrorMessage);
+		}
 		
 		static size_t curlDataReceived(void *buffer, size_t size, size_t nmemb, void *userData) {
 			Server *self = (Server *) userData;
@@ -164,6 +221,10 @@ private:
 			}
 			curl_slist_free_all(headers);
 		}
+
+		string name() const {
+			return ip + ":" + toString(port);
+		}
 		
 		bool ping() {
 			P_DEBUG("Pinging Union Station gateway " << ip << ":" << port);
@@ -187,6 +248,14 @@ private:
 			}
 		}
 		
+		/** Returns true if the server is up, false if the server is down.
+		 * The return value does NOT indicate whether the server accepted the data!
+		 * Thus, if (for example) the Union Station key is invalid or disabled,
+		 * but the connection is fine, then this method still returns true.
+		 * This is because the return value is used to determine whether a different
+		 * gateway server should be used. If the server is up but rejects the data
+		 * then we'll want the code to keep sending future packets.
+		 */
 		bool send(const Item &item) {
 			ScopeGuard guard(boost::bind(&Server::resetConnection, this));
 			prepareRequest(sinkURL);
@@ -239,17 +308,15 @@ private:
 			
 			if (code == CURLE_OK) {
 				guard.clear();
-				// TODO: check response
-				return true;
+				return handleSendResponse();
 			} else {
-				P_DEBUG("Could not send data to Union Station gateway server " << ip
-					<< ": " << lastErrorMessage);
+				handleSendError();
 				return false;
 			}
 		}
 	};
 	
-	typedef shared_ptr<Server> ServerPtr;
+	typedef boost::shared_ptr<Server> ServerPtr;
 	
 	string gatewayAddress;
 	unsigned short gatewayPort;
@@ -258,12 +325,13 @@ private:
 	BlockingQueue<Item> queue;
 	oxt::thread *thr;
 	
+	mutable boost::mutex syncher;
 	list<ServerPtr> servers;
 	time_t nextCheckupTime;
+	unsigned int packetsSent, packetsDropped;
 	
 	void threadMain() {
 		ScopeGuard guard(boost::bind(&RemoteSender::freeThreadData, this));
-		nextCheckupTime = 0;
 		
 		while (true) {
 			Item item;
@@ -292,23 +360,24 @@ private:
 	}
 	
 	bool firstStarted() const {
+		boost::lock_guard<boost::mutex> l(syncher);
 		return nextCheckupTime == 0;
 	}
 	
 	void recheckServers() {
-		P_DEBUG("Rechecking Union Station gateway servers (" << gatewayAddress << ")...");
+		P_INFO("Rechecking Union Station gateway servers (" << gatewayAddress << ")...");
 		
 		vector<string> ips;
 		vector<string>::const_iterator it;
+		list<ServerPtr> servers;
 		string hostName;
 		bool someServersAreDown = false;
 		
 		ips = resolveHostname(gatewayAddress, gatewayPort);
-		P_DEBUG(ips.size() << " Union Station gateway servers found");
+		P_INFO(ips.size() << " Union Station gateway servers found");
 		
-		servers.clear();
 		for (it = ips.begin(); it != ips.end(); it++) {
-			ServerPtr server = make_shared<Server>(*it, gatewayAddress, gatewayPort,
+			ServerPtr server = boost::make_shared<Server>(*it, gatewayAddress, gatewayPort,
 				certificate, &proxyInfo);
 			if (server->ping()) {
 				servers.push_back(server);
@@ -316,7 +385,7 @@ private:
 				someServersAreDown = true;
 			}
 		}
-		P_DEBUG(servers.size() << " Union Station gateway servers are up");
+		P_INFO(servers.size() << " Union Station gateway servers are up");
 		
 		if (servers.empty()) {
 			scheduleNextCheckup(5 * 60);
@@ -325,9 +394,13 @@ private:
 		} else {
 			scheduleNextCheckup(3 * 60 * 60);
 		}
+
+		boost::lock_guard<boost::mutex> l(syncher);
+		this->servers = servers;
 	}
 	
 	void freeThreadData() {
+		boost::lock_guard<boost::mutex> l(syncher);
 		servers.clear(); // Invoke destructors inside this thread.
 	}
 	
@@ -345,6 +418,7 @@ private:
 	}
 	
 	unsigned int msecUntilNextCheckup() const {
+		boost::lock_guard<boost::mutex> l(syncher);
 		time_t now = SystemTime::get();
 		if (now >= nextCheckupTime) {
 			return 0;
@@ -354,10 +428,12 @@ private:
 	}
 	
 	bool timeForCheckup() const {
+		boost::lock_guard<boost::mutex> l(syncher);
 		return SystemTime::get() >= nextCheckupTime;
 	}
 	
 	void sendOut(const Item &item) {
+		boost::unique_lock<boost::mutex> l(syncher);
 		bool sent = false;
 		bool someServersWentDown = false;
 		
@@ -365,12 +441,18 @@ private:
 			// Pick first available server and put it on the back of the list
 			// for round-robin load balancing.
 			ServerPtr server = servers.front();
-			servers.pop_front();
+			l.unlock();
 			if (server->send(item)) {
+				l.lock();
+				servers.pop_front();
 				servers.push_back(server);
 				sent = true;
+				packetsSent++;
 			} else {
+				l.lock();
+				servers.pop_front();
 				someServersWentDown = true;
+				packetsDropped++;
 			}
 		}
 		
@@ -386,6 +468,13 @@ private:
 		 * effectively dropped until after the next checkup has detected
 		 * servers that are up.
 		 */
+		if (!sent) {
+			P_WARN("Dropping Union Station packet because no servers are available: "
+				"key=" << item.unionStationKey <<
+				", node=" << item.nodeName <<
+				", category=" << item.category <<
+				", compressedDataSize=" << item.data.size());
+		}
 	}
 	
 	bool compress(const StaticString data[], unsigned int count, string &output) {
@@ -443,6 +532,9 @@ public:
 			throw RuntimeException("Invalid Union Station proxy address \"" +
 				proxyAddress + "\": " + e.what());
 		}
+		nextCheckupTime = 0;
+		packetsSent = 0;
+		packetsDropped = 0;
 		thr = new oxt::thread(
 			boost::bind(&RemoteSender::threadMain, this),
 			"RemoteSender thread",
@@ -494,11 +586,32 @@ public:
 
 		if (!queue.tryAdd(item)) {
 			P_WARN("The Union Station gateway isn't responding quickly enough; dropping packet.");
+			boost::lock_guard<boost::mutex> l(syncher);
+			packetsDropped++;
 		}
 	}
 	
 	unsigned int queued() const {
 		return queue.size();
+	}
+
+	template<typename Stream>
+	void inspect(Stream &stream) const {
+		boost::lock_guard<boost::mutex> l(syncher);
+		stream << "  Available servers (" << servers.size() << "): ";
+		foreach (const ServerPtr server, servers) {
+			stream << server->name() << " ";
+		}
+		stream << "\n";
+		stream << "  Items in queue: " << queue.size() << "\n";
+		stream << "  Packets sent out so far: " << packetsSent << "\n";
+		stream << "  Packets dropped out so far: " << packetsDropped << "\n";
+		stream << "  Next server checkup time: ";
+		if (nextCheckupTime == 0) {
+			stream << "not yet scheduled, waiting for first packet\n";
+		} else {
+			stream << "in " << distanceOfTimeInWords(nextCheckupTime) << "\n";
+		}
 	}
 };
 

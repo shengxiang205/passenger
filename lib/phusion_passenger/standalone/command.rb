@@ -1,5 +1,5 @@
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010-2012 Phusion
+#  Copyright (c) 2010-2013 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -21,8 +21,8 @@
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 #  THE SOFTWARE.
 require 'optparse'
-require 'phusion_passenger'
-require 'phusion_passenger/standalone/utils'
+PhusionPassenger.require_passenger_lib 'constants'
+PhusionPassenger.require_passenger_lib 'standalone/utils'
 
 module PhusionPassenger
 module Standalone
@@ -31,10 +31,12 @@ class Command
 	DEFAULT_OPTIONS = {
 		:address       => '0.0.0.0',
 		:port          => 3000,
-		:env           => ENV['RAILS_ENV'] || ENV['RACK_ENV'] || 'development',
+		:environment   => ENV['RAILS_ENV'] || ENV['RACK_ENV'] || ENV['NODE_ENV'] || ENV['PASSENGER_APP_ENV'] || 'development',
 		:max_pool_size => 6,
 		:min_instances => 1,
 		:spawn_method  => Kernel.respond_to?(:fork) ? 'smart' : 'direct',
+		:concurrency_model => DEFAULT_CONCURRENCY_MODEL,
+		:thread_count  => DEFAULT_THREAD_COUNT,
 		:nginx_version => PREFERRED_NGINX_VERSION
 	}.freeze
 	
@@ -66,16 +68,21 @@ private
 					too_old = true
 				end
 				if too_old
+					PhusionPassenger.require_passenger_lib 'platform_info/ruby'
+					gem_command = PlatformInfo.gem_command(:sudo => true)
 					error "Your version of daemon_controller is too old. " <<
 					      "You must install 1.1.0 or later. Please upgrade:\n\n" <<
 					      
-					      " sudo gem uninstall FooBarWidget-daemon_controller\n" <<
-					      " sudo gem install daemon_controller"
+					      " #{gem_command} uninstall FooBarWidget-daemon_controller\n" <<
+					      " #{gem_command} install daemon_controller",
+					      :wrap => false
 					exit 1
 				end
 			rescue LoadError
+				PhusionPassenger.require_passenger_lib 'platform_info/ruby'
+				gem_command = PlatformInfo.gem_command(:sudo => true)
 				error "Please install daemon_controller first:\n\n" <<
-				      " sudo gem install daemon_controller"
+				      " #{gem_command} install daemon_controller"
 				exit 1
 			end
 		end
@@ -90,7 +97,7 @@ private
 	end
 	
 	def require_app_finder
-		require 'phusion_passenger/standalone/app_finder' unless defined?(AppFinder)
+		PhusionPassenger.require_passenger_lib 'standalone/app_finder' unless defined?(AppFinder)
 	end
 	
 	def debugging?
@@ -102,7 +109,7 @@ private
 		
 		global_config_file = File.join(ENV['HOME'], USER_NAMESPACE_DIRNAME, "standalone", "config")
 		if File.exist?(global_config_file)
-			require 'phusion_passenger/standalone/config_file' unless defined?(ConfigFile)
+			PhusionPassenger.require_passenger_lib 'standalone/config_file' unless defined?(ConfigFile)
 			global_options = ConfigFile.new(:global_config, global_config_file).options
 			@options.merge!(global_options)
 		end
@@ -125,11 +132,22 @@ private
 		end
 	end
 	
-	def error(message)
+	def error(message, options = {})
+		wrap = options.fetch(:wrap, true)
 		if message =~ /\n/
-			STDERR.puts("*** ERROR ***\n" << wrap_desc(message, 80, 0))
+			if wrap
+				processed_message = wrap_desc(message, 80, 0)
+			else
+				processed_message = message
+			end
+			STDERR.puts("*** ERROR ***\n" << processed_message)
 		else
-			STDERR.puts(wrap_desc("*** ERROR: #{message}", 80, 0))
+			if wrap
+				processed_message = wrap_desc("*** ERROR: #{message}", 80, 0)
+			else
+				processed_message = "*** ERROR: #{message}"
+			end
+			STDERR.puts(processed_message)
 		end
 		@plugin.call_hook(:error, message) if @plugin
 	end
@@ -178,33 +196,45 @@ private
 	end
 	
 	def write_nginx_config_file
-		require 'phusion_passenger/platform_info/ruby'
-		ensure_directory_exists(@temp_dir)
-		
-		File.open(@location_config_filename, 'w') do |f|
-			f.puts '[locations]'
-			f.puts "natively_packaged=false"
-			f.puts "bin=#{PhusionPassenger.bin_dir}"
-			if debugging?
-				f.puts "agents=#{PhusionPassenger.agents_dir}"
-			else
-				f.puts "agents=#{@runtime_dirs[:support_dir]}"
-			end
-			f.puts "helper_scripts=#{PhusionPassenger.helper_scripts_dir}"
-			f.puts "resources=#{PhusionPassenger.resources_dir}"
-			f.puts "doc=#{PhusionPassenger.doc_dir}"
-			f.puts "rubylib=#{PhusionPassenger.ruby_libdir}"
-			f.puts "apache2_module=#{PhusionPassenger.apache2_module_path}"
-			f.puts "ruby_extension_source=#{PhusionPassenger.ruby_extension_source_dir}"
+		PhusionPassenger.require_passenger_lib 'platform_info/ruby'
+		PhusionPassenger.require_passenger_lib 'utils/tmpio'
+		# @temp_dir may already be set because we're redeploying
+		# using Mass Deployment.
+		@temp_dir ||= PhusionPassenger::Utils.mktmpdir(
+			"passenger-standalone.")
+		@config_filename = "#{@temp_dir}/config"
+		location_config_filename = "#{@temp_dir}/locations.ini"
+		File.chmod(0755, @temp_dir)
+		begin
+			Dir.mkdir("#{@temp_dir}/logs")
+		rescue Errno::EEXIST
 		end
-		puts File.read(@location_config_filename) if debugging?
+
+		locations_ini_fields =
+			PhusionPassenger::REQUIRED_LOCATIONS_INI_FIELDS +
+			PhusionPassenger::OPTIONAL_LOCATIONS_INI_FIELDS -
+			[:agents_dir, :lib_dir]
+		
+		File.open(location_config_filename, 'w') do |f|
+			f.puts '[locations]'
+			f.puts "natively_packaged=#{PhusionPassenger.natively_packaged?}"
+			if PhusionPassenger.natively_packaged?
+				f.puts "native_packaging_method=#{PhusionPassenger.native_packaging_method}"
+			end
+			f.puts "lib_dir=#{@runtime_locator.find_lib_dir}"
+			f.puts "agents_dir=#{@runtime_locator.find_agents_dir}"
+			locations_ini_fields.each do |field|
+				value = PhusionPassenger.send(field)
+				f.puts "#{field}=#{value}" if value
+			end
+		end
+		puts File.read(location_config_filename) if debugging?
 		
 		File.open(@config_filename, 'w') do |f|
 			f.chmod(0644)
-			template_filename = File.join(PhusionPassenger.resources_dir,
-				"templates", "standalone", "config.erb")
 			require_erb
-			erb = ERB.new(File.read(template_filename))
+			erb = ERB.new(File.read(nginx_config_template_filename), nil, "-")
+			current_user = Etc.getpwuid(Process.uid).name
 			
 			# The template requires some helper methods which are defined in start_command.rb.
 			output = erb.result(binding)
@@ -212,12 +242,35 @@ private
 			puts output if debugging?
 		end
 	end
+
+	def nginx_config_template_filename
+		if @options[:nginx_config_template]
+			return @options[:nginx_config_template]
+		else
+			return File.join(PhusionPassenger.resources_dir,
+				"templates", "standalone", "config.erb")
+		end
+	end
+
+	def boolean_config_value(val)
+		return val ? "on" : "off"
+	end
+
+	def serialize_strset(*items)
+		if "".respond_to?(:force_encoding)
+			items = items.map { |x| x.force_encoding('binary') }
+			null  = "\0".force_encoding('binary')
+		else
+			null  = "\0"
+		end
+		return [items.join(null)].pack('m*').gsub("\n", "").strip
+	end
 	
 	def determine_nginx_start_command
 		if @options[:nginx_bin]
 			nginx_bin = @options[:nginx_bin]
 		else
-			nginx_bin = "#{@runtime_dirs[:nginx_dir]}/nginx"
+			nginx_bin = @runtime_locator.find_nginx_binary
 		end
 		return "#{nginx_bin} -c '#{@config_filename}' -p '#{@temp_dir}/'"
 	end
@@ -234,9 +287,7 @@ private
 	def create_nginx_controller(extra_options = {})
 		require_daemon_controller
 		require 'socket' unless defined?(UNIXSocket)
-		@temp_dir        = "/tmp/passenger-standalone.#{$$}"
-		@config_filename = "#{@temp_dir}/config"
-		@location_config_filename = "#{@temp_dir}/locations.ini"
+		require 'thread' unless defined?(Mutex)
 		if @options[:socket_file]
 			ping_spec = [:unix, @options[:socket_file]]
 		else

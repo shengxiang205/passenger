@@ -1,5 +1,5 @@
 #  Phusion Passenger - https://www.phusionpassenger.com/
-#  Copyright (c) 2010-2013 Phusion
+#  Copyright (c) 2010-2014 Phusion
 #
 #  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
 #
@@ -22,9 +22,10 @@
 #  THE SOFTWARE.
 
 require 'thread'
-require 'phusion_passenger/utils'
-require 'phusion_passenger/debug_logging'
-require 'phusion_passenger/message_channel'
+PhusionPassenger.require_passenger_lib 'utils'
+PhusionPassenger.require_passenger_lib 'utils/native_support_utils'
+PhusionPassenger.require_passenger_lib 'debug_logging'
+PhusionPassenger.require_passenger_lib 'message_channel'
 
 module PhusionPassenger
 
@@ -47,7 +48,7 @@ class AnalyticsLogger
 		end
 		
 		def null?
-			return !@connection
+			return !@connection || !@connection.connected?
 		end
 		
 		def message(text)
@@ -81,12 +82,12 @@ class AnalyticsLogger
 			else
 				extra_info_base64 = nil
 			end
-			times = NativeSupport.process_times
+			times = Utils::NativeSupportUtils.process_times
 			message "BEGIN: #{name} (#{current_timestamp.to_s(36)},#{times.utime.to_s(36)},#{times.stime.to_s(36)}) #{extra_info_base64}"
 		end
 		
 		def end_measure(name, error_encountered = false)
-			times = NativeSupport.process_times
+			times = Utils::NativeSupportUtils.process_times
 			if error_encountered
 				message "FAIL: #{name} (#{current_timestamp.to_s(36)},#{times.utime.to_s(36)},#{times.stime.to_s(36)})"
 			else
@@ -125,7 +126,7 @@ class AnalyticsLogger
 			@connection.synchronize do
 				return if !@connection.connected?
 				begin
-					# We need an ACK here. See abstract_request_handler.rb finalize_request.
+					# We need an ACK here. See thread_handler.rb finalize_request.
 					@connection.channel.write("closeTransaction", @txn_id,
 						AnalyticsLogger.timestamp_string, true)
 					result = @connection.channel.read
@@ -228,7 +229,7 @@ class AnalyticsLogger
 		end
 	end
 	
-	def new_transaction(group_name, category = :requests, union_station_key = nil)
+	def new_transaction(group_name, category = :requests, union_station_key = "-")
 		if !@server_address
 			return Log.new
 		elsif !group_name || group_name.empty?
@@ -287,7 +288,7 @@ class AnalyticsLogger
 		end
 	end
 	
-	def continue_transaction(txn_id, group_name, category = :requests, union_station_key = nil)
+	def continue_transaction(txn_id, group_name, category = :requests, union_station_key = "-")
 		if !@server_address
 			return Log.new
 		elsif !txn_id || txn_id.empty?

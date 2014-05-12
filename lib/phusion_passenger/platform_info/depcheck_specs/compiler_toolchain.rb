@@ -1,9 +1,9 @@
-define 'gcc' do
-  name "GNU C compiler"
+define 'cc' do
+  name "C compiler"
   website "http://gcc.gnu.org/"
   define_checker do
-    require 'phusion_passenger/platform_info/compiler'
-    check_for_command(PlatformInfo.cc)
+    PhusionPassenger.require_passenger_lib 'platform_info/compiler'
+    check_for_command(PlatformInfo.cc, false)
   end
   
   on :debian do
@@ -19,16 +19,16 @@ define 'gcc' do
     emerge "gcc"
   end
   on :macosx do
-    xcode_install "Command Line Tools"
+    install_osx_command_line_tools
   end
 end
 
-define 'g++' do
-  name "GNU C++ compiler"
+define 'c++' do
+  name "C++ compiler"
   website "http://gcc.gnu.org/"
   define_checker do
-    require 'phusion_passenger/platform_info/compiler'
-    check_for_command(PlatformInfo.cxx)
+    PhusionPassenger.require_passenger_lib 'platform_info/compiler'
+    check_for_command(PlatformInfo.cxx, false)
   end
   
   on :debian do
@@ -44,14 +44,14 @@ define 'g++' do
     emerge "gcc"
   end
   on :macosx do
-    xcode_install "Command Line Tools"
+    install_osx_command_line_tools
   end
 end
 
 define 'make' do
   name "The 'make' tool"
   define_checker do
-    require 'phusion_passenger/platform_info/compiler'
+    PhusionPassenger.require_passenger_lib 'platform_info/compiler'
     check_for_command(PlatformInfo.make)
   end
   
@@ -65,7 +65,7 @@ define 'make' do
     yum_install "make"
   end
   on :macosx do
-    xcode_install "Command Line Tools"
+    install_osx_command_line_tools
   end
   on :other_platforms do
     website "http://www.gnu.org/software/make/"
@@ -75,7 +75,7 @@ end
 define 'gmake' do
   name "GNU make"
   define_checker do
-    require 'phusion_passenger/platform_info/compiler'
+    PhusionPassenger.require_passenger_lib 'platform_info/compiler'
     check_for_command(PlatformInfo.gnu_make)
   end
   
@@ -89,7 +89,7 @@ define 'gmake' do
     yum_install "make"
   end
   on :macosx do
-    xcode_install "Command Line Tools"
+    install_osx_command_line_tools
   end
   on :other_platforms do
     website "http://www.gnu.org/software/make/"

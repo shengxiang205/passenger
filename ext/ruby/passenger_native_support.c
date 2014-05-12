@@ -1,6 +1,6 @@
 /*
  *  Phusion Passenger - https://www.phusionpassenger.com/
- *  Copyright (c) 2010-2013 Phusion
+ *  Copyright (c) 2010-2014 Phusion
  *
  *  "Phusion Passenger" is a trademark of Hongli Lai & Ninh Bui.
  *
@@ -28,8 +28,13 @@
 	#include "ruby/intern.h"
 	#include "ruby/io.h"
 #else
+	/* Ruby 1.8 */
 	#include "rubysig.h"
 	#include "rubyio.h"
+	#include "version.h"
+#endif
+#ifdef HAVE_RUBY_VERSION_H
+	#include "ruby/version.h"
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -76,6 +81,10 @@
 #ifndef IOV_MAX
 	/* Linux doesn't define IOV_MAX in limits.h for some reason. */
 	#define IOV_MAX sysconf(_SC_IOV_MAX)
+#endif
+#ifdef HAVE_RB_THREAD_IO_BLOCKING_REGION
+	/* Ruby doesn't define this function in its headers */
+	VALUE rb_thread_io_blocking_region(rb_blocking_function_t *func, void *data1, int fd);
 #endif
 
 static VALUE mPassenger;
@@ -311,8 +320,13 @@ f_generic_writev(VALUE fd, VALUE *array_of_components, unsigned int count) {
 				writev_wrapper_data.filedes = fd_num;
 				writev_wrapper_data.iov     = groups[i].io_vectors;
 				writev_wrapper_data.iovcnt  = groups[i].count;
-				ret = (int) rb_thread_blocking_region(writev_wrapper,
-					&writev_wrapper_data, RUBY_UBF_IO, 0);
+				#ifdef HAVE_RB_THREAD_IO_BLOCKING_REGION
+					ret = (int) rb_thread_io_blocking_region(writev_wrapper,
+						&writev_wrapper_data, fd_num);
+				#else
+					ret = (int) rb_thread_blocking_region(writev_wrapper,
+						&writev_wrapper_data, RUBY_UBF_IO, 0);
+				#endif
 			#endif
 			if (ret == -1) {
 				/* If the error is something like EAGAIN, yield to another
@@ -724,11 +738,14 @@ fs_watcher_wait_fd(VALUE _fd) {
 static VALUE
 fs_watcher_read_byte_from_fd(VALUE _arg) {
 	FSWatcherReadByteData *data = (FSWatcherReadByteData *) _arg;
-	#ifdef TRAP_BEG
+	#if defined(TRAP_BEG)
 		TRAP_BEG;
 		data->ret = read(data->fd, &data->byte, 1);
 		TRAP_END;
 		data->error = errno;
+	#elif defined(HAVE_RB_THREAD_IO_BLOCKING_REGION)
+		rb_thread_io_blocking_region(fs_watcher_read_byte_from_fd_wrapper,
+			data, data->fd);
 	#else
 		rb_thread_blocking_region(fs_watcher_read_byte_from_fd_wrapper,
 			data, RUBY_UBF_IO, 0);
@@ -849,8 +866,79 @@ void
 Init_passenger_native_support() {
 	struct sockaddr_un addr;
 	
-	/* */
-	mPassenger = rb_define_module("PhusionPassenger"); // Do not remove the above comment. We want the Passenger module's rdoc to be empty.
+	/* Only defined on Ruby >= 1.9.3 */
+	#ifdef RUBY_API_VERSION_CODE
+		if (ruby_api_version[0] != RUBY_API_VERSION_MAJOR
+		 || ruby_api_version[1] != RUBY_API_VERSION_MINOR
+		 || ruby_api_version[2] != RUBY_API_VERSION_TEENY)
+		{
+			fprintf(stderr, " --> passenger_native_support was compiled for Ruby API version %d.%d.%d, "
+				"but you're currently running a Ruby interpreter with API version %d.%d.%d.\n",
+				RUBY_API_VERSION_MAJOR,
+				RUBY_API_VERSION_MINOR,
+				RUBY_API_VERSION_TEENY,
+				ruby_api_version[0],
+				ruby_api_version[1],
+				ruby_api_version[2]);
+			fprintf(stderr, "     Refusing to load existing passenger_native_support.\n");
+			return;
+		}
+		/* Because native extensions may be linked to libruby, loading
+		 * a Ruby 1.9 native extension may not fail on Ruby 1.8 (even though
+		 * the extension will crash later on). We detect such a case here and
+		 * abort early.
+		 */
+		if (strlen(ruby_version) >= sizeof("1.8.7") - 1
+		 && ruby_version[0] == '1'
+		 && ruby_version[1] == '.'
+		 && ruby_version[2] == '8')
+		{
+			fprintf(stderr, " --> passenger_native_support was compiled for Ruby %d.%d, "
+				"but you're currently running Ruby %s\n",
+				RUBY_API_VERSION_MAJOR,
+				RUBY_API_VERSION_MINOR,
+				ruby_version);
+			fprintf(stderr, "     Refusing to load existing passenger_native_support.\n");
+			return;
+		}
+	#else
+		/* Ruby 1.8 - 1.9.2 */
+
+		/* We may not have included Ruby 1.8's version.h because of compiler
+		 * header file search paths, so we can't rely on RUBY_VERSION being
+		 * defined.
+		 */
+		#ifdef RUBY_VERSION
+			#define ESTIMATED_RUBY_VERSION RUBY_VERSION
+		#else
+			#ifdef HAVE_RUBY_IO_H
+				#define ESTIMATED_RUBY_VERSION "1.9.1 or 1.9.2"
+			#else
+				#define ESTIMATED_RUBY_VERSION "1.8"
+			#endif
+		#endif
+		#ifdef HAVE_RUBY_IO_H
+			#define ESTIMATED_RUBY_MINOR_VERSION '9'
+		#else
+			#define ESTIMATED_RUBY_MINOR_VERSION '8'
+		#endif
+
+		#ifdef HAVE_RUBY_VERSION
+			if (strlen(ruby_version) < sizeof("1.8.7") - 1
+			 || ruby_version[0] != '1'
+			 || ruby_version[1] != '.'
+			 || ruby_version[2] != ESTIMATED_RUBY_MINOR_VERSION)
+			{
+				fprintf(stderr, " --> passenger_native_support was compiled for Ruby %s, "
+					"but you're currently running Ruby %s\n",
+					ESTIMATED_RUBY_VERSION, ruby_version);
+				fprintf(stderr, "     Refusing to load existing passenger_native_support.\n");
+				return;
+			}
+		#endif
+	#endif
+
+	mPassenger = rb_define_module("PhusionPassenger");
 	
 	/*
 	 * Utility functions for accessing system functionality.
